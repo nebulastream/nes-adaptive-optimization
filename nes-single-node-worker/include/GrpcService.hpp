@@ -39,6 +39,9 @@ public:
 
     grpc::Status RequestVersion(grpc::ServerContext* context, const google::protobuf::Empty* request, VersionResponse* response) override;
 
+    grpc::Status AdaptiveOptimization(
+        ::grpc::ServerContext* context, const ::AdaptiveOptimizationRequest* request, ::AdaptiveOptimizationResponse* response) override;
+
     explicit GRPCServer(SingleNodeWorker&& delegate) : delegate(std::move(delegate)) { }
 
 private:

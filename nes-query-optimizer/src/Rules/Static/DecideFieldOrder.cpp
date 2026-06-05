@@ -105,12 +105,12 @@ Visitor::UpResult setSinkFieldOrder(
     {
         auto newChild = ProjectionLogicalOperator::create(child, {}, ProjectionLogicalOperator::Asterisk{true});
         auto traitSet = newChild.getTraitSet();
-        traitSet.insert(FieldOrderingTrait{operatorContext.requiredFieldOrdering});
+        traitSet.insertOrReplace(FieldOrderingTrait{operatorContext.requiredFieldOrdering});
         child = newChild.withChildren({child}).withTraitSet(traitSet);
     }
 
     auto rootTraitSet = sink->getTraitSet();
-    rootTraitSet.insert(FieldOrderingTrait{Schema<UnqualifiedUnboundField, Ordered>{}});
+    rootTraitSet.insertOrReplace(FieldOrderingTrait{Schema<UnqualifiedUnboundField, Ordered>{}});
 
     return {op.withChildren({child}).withTraitSet(rootTraitSet), false};
 }
@@ -189,12 +189,12 @@ Visitor::UpResult decideFieldOrder(
 
     if (operatorContext.requiredFieldOrdering.size() > 0)
     {
-        traitSet.insert(FieldOrderingTrait{unbind(operatorContext.requiredFieldOrdering)});
+        traitSet.insertOrReplace(FieldOrderingTrait{unbind(operatorContext.requiredFieldOrdering)});
     }
     else
     {
         const auto outputOrder = calculateOutputOrder(op, children);
-        traitSet.insert(FieldOrderingTrait{unbind(outputOrder)});
+        traitSet.insertOrReplace(FieldOrderingTrait{unbind(outputOrder)});
     }
 
     return {op.withTraitSet(std::move(traitSet)), operatorContext.hasMultipleParents};

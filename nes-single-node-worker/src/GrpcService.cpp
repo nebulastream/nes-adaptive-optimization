@@ -224,4 +224,14 @@ grpc::Status GRPCServer::RequestVersion(grpc::ServerContext* context, const goog
         context);
 }
 
+grpc::Status
+GRPCServer::AdaptiveOptimization(grpc::ServerContext* context, const AdaptiveOptimizationRequest*, AdaptiveOptimizationResponse*)
+{
+    return tryWithDefaultHandling([&]
+    {
+        delegate.adaptiveOptimization();
+        return grpc::Status::OK;
+    }, context);
+}
+
 }
