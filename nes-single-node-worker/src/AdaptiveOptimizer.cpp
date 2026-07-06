@@ -1,5 +1,5 @@
 /*
-Licensed under the Apache License, Version 2.0 (the "License");
+    Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
     You may obtain a copy of the License at
 
@@ -40,7 +40,8 @@ std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan 
         if (auto dynamic = rule.tryGetAs<DynamicRule<LogicalPlan, PlanStatistics>>())
         {
             plan = (*dynamic.value())->apply(plan, planStatistics);
-        } else
+        }
+        else
         {
             plan = rule.apply(plan);
         }

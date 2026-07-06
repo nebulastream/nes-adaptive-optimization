@@ -167,7 +167,6 @@ std::expected<void, Exception> SingleNodeWorker::stopQuery(QueryId queryId) noex
 
 std::expected<void, Exception> SingleNodeWorker::adaptiveOptimization() noexcept
 {
-
     for (auto& plan : localQueryCatalog | std::views::values)
     {
         PlanStatistics statistics{};
