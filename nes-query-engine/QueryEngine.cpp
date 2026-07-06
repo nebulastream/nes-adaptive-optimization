@@ -69,6 +69,10 @@ namespace
 constexpr auto PIPELINE_STOP_BACKOFF_INTERVAL = std::chrono::milliseconds(25);
 constexpr auto PIPELINE_STOP_BACKOFF_THRESHOLD = 2;
 
+/// Backoff used while polling for the old plan of a ReplaceQueryTask to finish its asynchronous soft-stop.
+constexpr auto REPLACE_QUERY_BACKOFF_INTERVAL = std::chrono::milliseconds(25);
+constexpr auto REPLACE_QUERY_BACKOFF_THRESHOLD = 2;
+
 /// This function is unsafe because it requires the lifetime of the RunningQueryPlanNode exceed the lifetime of the callback
 auto injectQueryFailureUnsafe(RunningQueryPlanNode& node, TaskCallback::onFailure failure)
 {
@@ -182,9 +186,19 @@ public:
         const std::shared_ptr<QueryEngineStatisticListener>& statistic,
         QueryLifetimeController& controller,
         WorkEmitter& emitter);
-    void replace(
+
+    /// The old plan can only be torn down asynchronously (pipelines/sources drain via the task queue), so a single
+    /// call cannot both wait for that and start the replacement. `plan` is only consumed (moved-from) on Completed;
+    /// on Pending the caller keeps ownership and must call replace() again once the old plan has terminated.
+    enum class ReplaceOutcome
+    {
+        NotFound,
+        Pending,
+        Completed
+    };
+    ReplaceOutcome replace(
         QueryId queryId,
-        std::unique_ptr<ExecutableQueryPlan> plan,
+        std::unique_ptr<ExecutableQueryPlan>& plan,
         const std::shared_ptr<AbstractQueryStatusListener>& listener,
         const std::shared_ptr<QueryEngineStatisticListener>& statistic,
         QueryLifetimeController& controller,
@@ -706,15 +720,39 @@ bool ThreadPool::WorkerThread::operator()(ReplaceQueryTask& replaceQuery) const
     LogContext logContext("Task", fmt::format("{}", replaceQuery.queryId));
     ENGINE_LOG_INFO("Replace Query Task for Query {}", replaceQuery.queryId);
 
-
-    if (auto queryCatalog = replaceQuery.catalog.lock())
+    auto queryCatalog = replaceQuery.catalog.lock();
+    if (!queryCatalog)
     {
-        queryCatalog->replace(replaceQuery.queryId, std::move(replaceQuery.queryPlan), pool.listener, pool.statistic, pool, pool);
-        /// Readd the line
-        /// pool.statistic->onEvent(QueryStart{WorkerThread::id, replaceQuery.queryId});
-        return true;
+        return false;
     }
-    return false;
+
+    switch (queryCatalog->replace(replaceQuery.queryId, replaceQuery.queryPlan, pool.listener, pool.statistic, pool, pool))
+    {
+        case QueryCatalog::ReplaceOutcome::NotFound:
+            ENGINE_LOG_WARNING("tried to replace query {} that was not found in catalog", replaceQuery.queryId);
+            return true;
+        case QueryCatalog::ReplaceOutcome::Completed:
+            return true;
+        case QueryCatalog::ReplaceOutcome::Pending: {
+            /// The old plan is still tearing down asynchronously;
+            ReplaceQueryTask repeatTask(
+                replaceQuery.queryId,
+                std::move(replaceQuery.queryPlan),
+                replaceQuery.catalog,
+                replaceQuery.attempts + 1,
+                std::move(replaceQuery.callback));
+            if (replaceQuery.attempts >= REPLACE_QUERY_BACKOFF_THRESHOLD)
+            {
+                pool.delayedTaskSubmitter.submitTaskIn(std::move(repeatTask), REPLACE_QUERY_BACKOFF_INTERVAL);
+            }
+            else
+            {
+                pool.addInternalTask(std::move(repeatTask));
+            }
+            return false;
+        }
+    }
+    std::unreachable();
 }
 
 bool ThreadPool::WorkerThread::operator()(StopSourceTask& stopSource) const
@@ -826,7 +864,7 @@ void QueryEngine::start(std::unique_ptr<ExecutableQueryPlan> executableQueryPlan
 void QueryEngine::replace(std::unique_ptr<ExecutableQueryPlan> executableQueryPlan)
 {
     threadPool->taskQueue.addAdmissionTaskBlocking(
-        {}, ReplaceQueryTask{executableQueryPlan->queryId, std::move(executableQueryPlan), queryCatalog, TaskCallback{}});
+        {}, ReplaceQueryTask{executableQueryPlan->queryId, std::move(executableQueryPlan), queryCatalog, 0, TaskCallback{}});
 }
 
 QueryEngine::~QueryEngine()
@@ -836,123 +874,123 @@ QueryEngine::~QueryEngine()
 }
 
 struct RealQueryLifeTimeListener : QueryLifetimeListener
+{
+    RealQueryLifeTimeListener(
+        QueryId queryId, std::shared_ptr<AbstractQueryStatusListener> listener, std::shared_ptr<QueryEngineStatisticListener> statistic)
+        : listener(std::move(listener)), statistic(std::move(statistic)), queryId(queryId)
     {
-        RealQueryLifeTimeListener(
-            QueryId queryId, std::shared_ptr<AbstractQueryStatusListener> listener, std::shared_ptr<QueryEngineStatisticListener> statistic)
-            : listener(std::move(listener)), statistic(std::move(statistic)), queryId(queryId)
-        {
-        }
+    }
 
-        void onRunning() override
+    void onRunning() override
+    {
+        ENGINE_LOG_DEBUG("Query {} onRunning", queryId);
+        const auto timestamp = std::chrono::system_clock::now();
+        if (const auto locked = state.lock())
         {
-            ENGINE_LOG_DEBUG("Query {} onRunning", queryId);
-            const auto timestamp = std::chrono::system_clock::now();
-            if (const auto locked = state.lock())
+            locked->transition(
+                [](Reserved&&)
+                {
+                    INVARIANT(false, "Bug: Jumping from reserved to running state should be impossible.");
+                    return Terminated{Terminated::Failed};
+                },
+                [](Starting&& starting) { return Running{std::move(starting.plan)}; });
+            listener->logQueryStatusChange(queryId, QueryStatus::Running, timestamp);
+        }
+    }
+
+    void onFailure(Exception exception) override
+    {
+        ENGINE_LOG_DEBUG("Query {} onFailure", queryId);
+        const auto timestamp = std::chrono::system_clock::now();
+        if (const auto locked = state.lock())
+        {
+            /// We want to avoid running destructors and callbacks while holding the atomic transition lock.
+            /// So we move the queryplan out of the lock and dispose (if there exists one)
+            std::optional<std::variant<std::unique_ptr<RunningQueryPlan>, std::unique_ptr<StoppingQueryPlan>>> toDispose{};
+            /// Regardless of its current state the query should move into the Terminated::Failed state.
+            locked->transition(
+                [](Reserved&&)
+                {
+                    ENGINE_LOG_DEBUG("Query was stopped before all pipeline starts were submitted");
+                    return Terminated{Terminated::Failed};
+                },
+                [&toDispose](Starting&& starting)
+                {
+                    toDispose = std::move(starting.plan);
+                    return Terminated{Terminated::Failed};
+                },
+                [&toDispose](Running&& running)
+                {
+                    toDispose = std::move(running.plan);
+                    return Terminated{Terminated::Failed};
+                },
+                [&toDispose](Stopping&& stopping)
+                {
+                    toDispose = std::move(stopping.plan);
+                    return Terminated{Terminated::Failed};
+                },
+                [](Terminated&&) { return Terminated{Terminated::Failed}; });
+
+            /// Dispose after the transition (lock released) to avoid deadlock
+            if (toDispose)
             {
-                locked->transition(
-                    [](Reserved&&)
-                    {
-                        INVARIANT(false, "Bug: Jumping from reserved to running state should be impossible.");
-                        return Terminated{Terminated::Failed};
-                    },
-                    [](Starting&& starting) { return Running{std::move(starting.plan)}; });
-                listener->logQueryStatusChange(queryId, QueryStatus::Running, timestamp);
+                std::visit([]<typename T>(T&& plan) { T::element_type::dispose(std::forward<T>(plan)); }, std::move(toDispose).value());
+            }
+
+            exception.what() += fmt::format(" in Query {}.", queryId);
+            ENGINE_LOG_ERROR("Query Failed: {}", exception.what());
+            listener->logQueryFailure(queryId, std::move(exception), timestamp);
+            statistic->onEvent(QueryFail(ThreadPool::WorkerThread::id, queryId));
+        }
+    }
+
+    /// OnDestruction is called when the entire query graph is terminated.
+    void onDestruction() override
+    {
+        ENGINE_LOG_DEBUG("Query {} onDestruction", queryId);
+        const auto timestamp = std::chrono::system_clock::now();
+        if (const auto locked = state.lock())
+        {
+            /// We want to avoid running destructors and callbacks while holding the atomic transition lock.
+            /// So we move the queryplan out of the lock and dispose (if there exists one)
+            std::optional<std::variant<std::unique_ptr<RunningQueryPlan>, std::unique_ptr<StoppingQueryPlan>>> toDispose{};
+
+            const auto didTransition = locked->transition(
+                [&toDispose](Starting&& starting)
+                {
+                    toDispose = std::move(starting.plan);
+                    return Terminated{Terminated::Stopped};
+                },
+                [&toDispose](Running&& running)
+                {
+                    toDispose = std::move(running.plan);
+                    return Terminated{Terminated::Stopped};
+                },
+                [&toDispose](Stopping&& stopping)
+                {
+                    toDispose = std::move(stopping.plan);
+                    return Terminated{Terminated::Stopped};
+                });
+
+            /// Dispose after the transition (lock released) to avoid deadlock
+            if (toDispose)
+            {
+                std::visit([]<typename T>(T&& plan) { T::element_type::dispose(std::forward<T>(plan)); }, std::move(toDispose).value());
+            }
+
+            if (didTransition)
+            {
+                listener->logQueryStatusChange(queryId, QueryStatus::Stopped, timestamp);
+                statistic->onEvent(QueryStop(ThreadPool::WorkerThread::id, queryId));
             }
         }
+    }
 
-        void onFailure(Exception exception) override
-        {
-            ENGINE_LOG_DEBUG("Query {} onFailure", queryId);
-            const auto timestamp = std::chrono::system_clock::now();
-            if (const auto locked = state.lock())
-            {
-                /// We want to avoid running destructors and callbacks while holding the atomic transition lock.
-                /// So we move the queryplan out of the lock and dispose (if there exists one)
-                std::optional<std::variant<std::unique_ptr<RunningQueryPlan>, std::unique_ptr<StoppingQueryPlan>>> toDispose{};
-                /// Regardless of its current state the query should move into the Terminated::Failed state.
-                locked->transition(
-                    [](Reserved&&)
-                    {
-                        ENGINE_LOG_DEBUG("Query was stopped before all pipeline starts were submitted");
-                        return Terminated{Terminated::Failed};
-                    },
-                    [&toDispose](Starting&& starting)
-                    {
-                        toDispose = std::move(starting.plan);
-                        return Terminated{Terminated::Failed};
-                    },
-                    [&toDispose](Running&& running)
-                    {
-                        toDispose = std::move(running.plan);
-                        return Terminated{Terminated::Failed};
-                    },
-                    [&toDispose](Stopping&& stopping)
-                    {
-                        toDispose = std::move(stopping.plan);
-                        return Terminated{Terminated::Failed};
-                    },
-                    [](Terminated&&) { return Terminated{Terminated::Failed}; });
-
-                /// Dispose after the transition (lock released) to avoid deadlock
-                if (toDispose)
-                {
-                    std::visit([]<typename T>(T&& plan) { T::element_type::dispose(std::forward<T>(plan)); }, std::move(toDispose).value());
-                }
-
-                exception.what() += fmt::format(" in Query {}.", queryId);
-                ENGINE_LOG_ERROR("Query Failed: {}", exception.what());
-                listener->logQueryFailure(queryId, std::move(exception), timestamp);
-                statistic->onEvent(QueryFail(ThreadPool::WorkerThread::id, queryId));
-            }
-        }
-
-        /// OnDestruction is called when the entire query graph is terminated.
-        void onDestruction() override
-        {
-            ENGINE_LOG_DEBUG("Query {} onDestruction", queryId);
-            const auto timestamp = std::chrono::system_clock::now();
-            if (const auto locked = state.lock())
-            {
-                /// We want to avoid running destructors and callbacks while holding the atomic transition lock.
-                /// So we move the queryplan out of the lock and dispose (if there exists one)
-                std::optional<std::variant<std::unique_ptr<RunningQueryPlan>, std::unique_ptr<StoppingQueryPlan>>> toDispose{};
-
-                const auto didTransition = locked->transition(
-                    [&toDispose](Starting&& starting)
-                    {
-                        toDispose = std::move(starting.plan);
-                        return Terminated{Terminated::Stopped};
-                    },
-                    [&toDispose](Running&& running)
-                    {
-                        toDispose = std::move(running.plan);
-                        return Terminated{Terminated::Stopped};
-                    },
-                    [&toDispose](Stopping&& stopping)
-                    {
-                        toDispose = std::move(stopping.plan);
-                        return Terminated{Terminated::Stopped};
-                    });
-
-                /// Dispose after the transition (lock released) to avoid deadlock
-                if (toDispose)
-                {
-                    std::visit([]<typename T>(T&& plan) { T::element_type::dispose(std::forward<T>(plan)); }, std::move(toDispose).value());
-                }
-
-                if (didTransition)
-                {
-                    listener->logQueryStatusChange(queryId, QueryStatus::Stopped, timestamp);
-                    statistic->onEvent(QueryStop(ThreadPool::WorkerThread::id, queryId));
-                }
-            }
-        }
-
-        std::shared_ptr<AbstractQueryStatusListener> listener;
-        std::shared_ptr<QueryEngineStatisticListener> statistic;
-        QueryId queryId;
-        QueryCatalog::WeakStateRef state;
-    };
+    std::shared_ptr<AbstractQueryStatusListener> listener;
+    std::shared_ptr<QueryEngineStatisticListener> statistic;
+    QueryId queryId;
+    QueryCatalog::WeakStateRef state;
+};
 
 void QueryCatalog::start(
     QueryId queryId,
@@ -988,20 +1026,29 @@ void QueryCatalog::start(
     }
 }
 
-void QueryCatalog::replace(
+QueryCatalog::ReplaceOutcome QueryCatalog::replace(
     QueryId queryId,
-    std::unique_ptr<ExecutableQueryPlan> plan,
+    std::unique_ptr<ExecutableQueryPlan>& plan,
     const std::shared_ptr<AbstractQueryStatusListener>& listener,
     const std::shared_ptr<QueryEngineStatisticListener>& statistic,
     QueryLifetimeController& controller,
     WorkEmitter& emitter)
 {
     const std::scoped_lock lock(mutex);
-    if (auto it = queryStates.find(queryId); it != queryStates.end())
+    auto it = queryStates.find(queryId);
+    if (it == queryStates.end())
     {
-        auto& state = *it->second;
+        ENGINE_LOG_WARNING("Attempting to replace query {} failed. Query was not submitted to the engine.", queryId);
+        return ReplaceOutcome::NotFound;
+    }
+
+    auto& state = *it->second;
+
+
+    if (state.is<Starting>() || state.is<Running>())
+    {
         absl::AnyInvocable<void()> cleanup;
-        bool didTransition = state.transition(
+        state.transition(
             [&cleanup](Starting&& starting) /// NOLINT(cppcoreguidelines-rvalue-reference-param-not-moved)
             {
                 auto [stoppingQueryPlan, cb] = RunningQueryPlan::stop(std::move(starting.plan));
@@ -1014,42 +1061,42 @@ void QueryCatalog::replace(
                 cleanup = std::move(cb);
                 return Stopping{std::move(stoppingQueryPlan)};
             });
-
-        if (didTransition)
+        if (cleanup)
         {
-
             cleanup();
-
-            auto queryListener = std::make_shared<RealQueryLifeTimeListener>(queryId, listener, statistic);
-            const auto startTimestamp = std::chrono::system_clock::now();
-            auto newState = std::make_shared<StateRef>(Reserved{});
-            this->queryStates.insert_or_assign(queryId, newState);
-            queryListener->state = newState;
-
-            auto [runningQueryPlan, callback] = RunningQueryPlan::start(queryId, std::move(plan), controller, emitter, queryListener);
-
-            if (newState->transition([&](Reserved&&)
-                                  { return Starting{std::move(runningQueryPlan)}; })) /// NOLINT(cppcoreguidelines-rvalue-reference-param-not-moved)
-            {
-                listener->logQueryStatusChange(queryId, QueryStatus::Started, startTimestamp);
-            }
-            else
-            {
-                /// The move did not happen.
-                INVARIANT(
-                    newState->is<Terminated>(),
-                    "Bug: There is no other option for the state. The only transition from reserved to Starting happens here. Starting will "
-                    "not transition into running until the callback is dropped.");
-                RunningQueryPlan::dispose(std::move(runningQueryPlan));
-            }
         }
+    }
+
+    if (!state.is<Terminated>())
+    {
+        /// ensure query is only replaces after it successfully stopped
+        return ReplaceOutcome::Pending;
+    }
+
+    auto queryListener = std::make_shared<RealQueryLifeTimeListener>(queryId, listener, statistic);
+    const auto startTimestamp = std::chrono::system_clock::now();
+    auto newState = std::make_shared<StateRef>(Reserved{});
+    this->queryStates.insert_or_assign(queryId, newState);
+    queryListener->state = newState;
+
+    auto [runningQueryPlan, callback] = RunningQueryPlan::start(queryId, std::move(plan), controller, emitter, queryListener);
+
+    if (newState->transition(
+            [&](Reserved&&)
+            { return Starting{std::move(runningQueryPlan)}; })) /// NOLINT(cppcoreguidelines-rvalue-reference-param-not-moved)
+    {
+        listener->logQueryStatusChange(queryId, QueryStatus::Started, startTimestamp);
     }
     else
     {
-        ENGINE_LOG_WARNING("Attempting to stop query {} failed. Query was not submitted to the engine.", queryId);
+        /// The move did not happen.
+        INVARIANT(
+            newState->is<Terminated>(),
+            "Bug: There is no other option for the state. The only transition from reserved to Starting happens here. Starting will "
+            "not transition into running until the callback is dropped.");
+        RunningQueryPlan::dispose(std::move(runningQueryPlan));
     }
-
-
+    return ReplaceOutcome::Completed;
 }
 
 void QueryCatalog::stopQuery(QueryId id)
