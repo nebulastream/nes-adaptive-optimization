@@ -1,5 +1,5 @@
 /*
-Licensed under the Apache License, Version 2.0 (the "License");
+    Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
     You may obtain a copy of the License at
 
@@ -30,28 +30,29 @@ namespace NES
 LogicalOperator straw(LogicalOperator op, const PlanStatistics& statistics)
 {
     std::vector<LogicalOperator> newChildren;
-    for (auto child: op.getChildren())
+    for (auto child : op.getChildren())
     {
         newChildren.emplace_back(straw(child, statistics));
     }
 
-    if (auto projectionOp  = op.tryGetAs<ProjectionLogicalOperator>())
+    if (auto projectionOp = op.tryGetAs<ProjectionLogicalOperator>())
     {
         auto projections = std::vector<std::pair<Identifier, LogicalFunction>>();
 
-        for (auto [field, function]: projectionOp.value()->getProjections())
+        for (auto [field, function] : projectionOp.value()->getProjections())
         {
             if (function.getDataType() == DataType{DataType::Type::UINT64, DataType::NULLABLE::NOT_NULLABLE})
             {
-                function = MulLogicalFunction{function, ConstantValueLogicalFunction{DataType{DataType::Type::UINT64, DataType::NULLABLE::NOT_NULLABLE}, "2"}};
+                function = MulLogicalFunction{
+                    function, ConstantValueLogicalFunction{DataType{DataType::Type::UINT64, DataType::NULLABLE::NOT_NULLABLE}, "2"}};
             }
             projections.emplace_back(field.getLastName(), function);
         }
-        return ProjectionLogicalOperator::create(newChildren.at(0), projections, ProjectionLogicalOperator::Asterisk{projectionOp.value()->hasAsterisk()});
+        return ProjectionLogicalOperator::create(
+            newChildren.at(0), projections, ProjectionLogicalOperator::Asterisk{projectionOp.value()->hasAsterisk()});
     }
     return op.withChildren({newChildren});
 }
-
 
 LogicalPlan StrawmanDynamicRule::apply(LogicalPlan queryPlan, PlanStatistics statistics) const
 {
@@ -69,8 +70,6 @@ LogicalPlan StrawmanDynamicRule::apply(LogicalPlan) const
 {
     throw NotImplemented("use ::appl(LogicalPlan, PlanStatistics");
 }
-
-
 
 const std::type_info& StrawmanDynamicRule::getType()
 {

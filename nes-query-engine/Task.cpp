@@ -156,8 +156,12 @@ StartQueryTask::StartQueryTask(
 }
 
 ReplaceQueryTask::ReplaceQueryTask(
-    QueryId queryId, std::unique_ptr<ExecutableQueryPlan> queryPlan, std::weak_ptr<QueryCatalog> catalog, TaskCallback callback)
-    : BaseTask(std::move(queryId), std::move(callback)), queryPlan(std::move(queryPlan)), catalog(std::move(catalog))
+    QueryId queryId,
+    std::unique_ptr<ExecutableQueryPlan> queryPlan,
+    std::weak_ptr<QueryCatalog> catalog,
+    size_t attempts,
+    TaskCallback callback)
+    : BaseTask(std::move(queryId), std::move(callback)), attempts(attempts), queryPlan(std::move(queryPlan)), catalog(std::move(catalog))
 {
 }
 

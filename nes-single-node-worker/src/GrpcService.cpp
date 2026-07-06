@@ -227,11 +227,13 @@ grpc::Status GRPCServer::RequestStatus(grpc::ServerContext* context, const Worke
 grpc::Status
 GRPCServer::AdaptiveOptimization(grpc::ServerContext* context, const AdaptiveOptimizationRequest*, AdaptiveOptimizationResponse*)
 {
-    return tryWithDefaultHandling([&]
-    {
-        delegate.adaptiveOptimization();
-        return grpc::Status::OK;
-    }, context);
+    return tryWithDefaultHandling(
+        [&]
+        {
+            delegate.adaptiveOptimization();
+            return grpc::Status::OK;
+        },
+        context);
 }
 
 }
