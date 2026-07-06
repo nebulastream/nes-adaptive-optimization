@@ -188,8 +188,13 @@ struct StartQueryTask : BaseTask
 struct ReplaceQueryTask : BaseTask
 {
     ReplaceQueryTask(
-        QueryId queryId, std::unique_ptr<ExecutableQueryPlan> queryPlan, std::weak_ptr<QueryCatalog> catalog, TaskCallback callback);
+        QueryId queryId,
+        std::unique_ptr<ExecutableQueryPlan> queryPlan,
+        std::weak_ptr<QueryCatalog> catalog,
+        size_t attempts,
+        TaskCallback callback);
 
+    size_t attempts;
     std::unique_ptr<ExecutableQueryPlan> queryPlan;
     std::weak_ptr<QueryCatalog> catalog;
 };
