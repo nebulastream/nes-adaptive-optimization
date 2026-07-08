@@ -16,20 +16,34 @@
 
 #include <Rules/RuleManager.hpp>
 #include <Runtime/NodeEngine.hpp>
+#include <Util/Pointers.hpp>
+#include <LocalQueryCatalog.hpp>
+#include <QueryCompiler.hpp>
 #include <Statistics.hpp>
+#include <Thread.hpp>
 
 namespace NES
 {
 class AdaptiveOptimizer
 {
 public:
-    explicit AdaptiveOptimizer();
+    explicit AdaptiveOptimizer(
+        SharedPtr<LocalQueryCatalog> localQueryCatalog,
+        SharedPtr<QueryCompilation::QueryCompiler> compiler,
+        SharedPtr<NodeEngine> nodeEngine);
+    void reoptimize();
 
-    std::expected<LogicalPlan, Exception> reoptimize(LogicalPlan plan, const PlanStatistics& planStatistics);
-
+    static constexpr int REOPTIMIZATION_INTERVAL_MS = 5000;
 
 private:
+    SharedPtr<LocalQueryCatalog> localQueryCatalog;
+    SharedPtr<QueryCompilation::QueryCompiler> compiler;
+    SharedPtr<NodeEngine> nodeEngine;
     std::vector<Rule<LogicalPlan>> ruleSequence;
+    Thread thread;
+
+    std::expected<LogicalPlan, Exception> reoptimize(LogicalPlan plan, const PlanStatistics& planStatistics);
+    void start(std::stop_token stop_token);
 };
 
 }

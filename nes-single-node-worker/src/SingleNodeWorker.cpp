@@ -73,9 +73,9 @@ SingleNodeWorker::SingleNodeWorker(const SingleNodeWorkerConfiguration& configur
     }
 
     nodeEngine = NodeEngineBuilder(configuration.workerConfiguration, copyPtr(listener)).build(host);
-    compiler = std::make_unique<QueryCompilation::QueryCompiler>(configuration.workerConfiguration.defaultQueryExecution);
-    localQueryCatalog.clear();
-    adaptiveOptimizer = std::make_unique<AdaptiveOptimizer>();
+    compiler = std::make_shared<QueryCompilation::QueryCompiler>(configuration.workerConfiguration.defaultQueryExecution);
+    localQueryCatalog = std::make_shared<LocalQueryCatalog>();
+    adaptiveOptimizer = std::make_unique<AdaptiveOptimizer>(copyPtr(localQueryCatalog), copyPtr(compiler), copyPtr(nodeEngine));
 
     if (!configuration.dataAddress.getValue().empty())
     {
@@ -124,7 +124,7 @@ std::expected<QueryId, Exception> SingleNodeWorker::registerQuery(LogicalPlan pl
         auto result = compiler->compileQuery(std::move(request));
         INVARIANT(result, "expected successful query compilation or exception, but got nothing");
         nodeEngine->registerCompiledQueryPlan(plan.getQueryId(), std::move(result));
-        localQueryCatalog.emplace(plan.getQueryId(), plan);
+        localQueryCatalog->addPlan(plan.getQueryId(), plan);
         return plan.getQueryId();
     }
     CPPTRACE_CATCH(...)
@@ -155,7 +155,7 @@ std::expected<void, Exception> SingleNodeWorker::stopQuery(QueryId queryId) noex
     {
         PRECONDITION(queryId != INVALID_QUERY_ID, "QueryId must be not invalid!");
         nodeEngine->stopQuery(queryId);
-        localQueryCatalog.erase(queryId);
+        localQueryCatalog->removePlan(queryId);
         return {};
     }
     CPPTRACE_CATCH(...)
@@ -167,21 +167,7 @@ std::expected<void, Exception> SingleNodeWorker::stopQuery(QueryId queryId) noex
 
 std::expected<void, Exception> SingleNodeWorker::adaptiveOptimization() noexcept
 {
-    for (auto& plan : localQueryCatalog | std::views::values)
-    {
-        PlanStatistics statistics{};
-        auto result = adaptiveOptimizer->reoptimize(plan, statistics);
-
-        if (!result.has_value())
-        {
-            return std::unexpected{result.error()};
-        }
-        auto request = std::make_unique<QueryCompilation::QueryCompilationRequest>(result.value());
-        auto compiled = compiler->compileQuery(std::move(request));
-        nodeEngine->replaceQueryPlan(std::move(compiled));
-        plan = result.value();
-    }
-
+    adaptiveOptimizer->reoptimize();
     return {};
 }
 

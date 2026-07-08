@@ -27,6 +27,7 @@
 #include <AdaptiveOptimizer.hpp>
 #include <CompositeStatisticListener.hpp>
 #include <ErrorHandling.hpp>
+#include <LocalQueryCatalog.hpp>
 #include <QueryCompiler.hpp>
 #include <QueryStatus.hpp>
 #include <SingleNodeWorkerConfiguration.hpp>
@@ -43,10 +44,11 @@ class SingleNodeWorker
 {
     SharedPtr<CompositeStatisticListener> listener;
     SharedPtr<NodeEngine> nodeEngine;
-    UniquePtr<QueryCompilation::QueryCompiler> compiler;
+    SharedPtr<QueryCompilation::QueryCompiler> compiler;
     UniquePtr<AdaptiveOptimizer> adaptiveOptimizer;
-    std::unordered_map<QueryId, LogicalPlan> localQueryCatalog;
+    SharedPtr<LocalQueryCatalog> localQueryCatalog;
     SingleNodeWorkerConfiguration configuration;
+    std::jthread adaptiveOptimizerThread;
 
 public:
     explicit SingleNodeWorker(const SingleNodeWorkerConfiguration&, const Host& = Host("SingleNodeWorker"));

@@ -13,23 +13,47 @@
 */
 #include <AdaptiveOptimizer.hpp>
 
+#include <Rules/Dynamic/StrawmanDynamicRule.hpp>
+#include <Rules/Static/DecideFieldMappings.hpp>
+#include <Rules/Static/DecideFieldOrder.hpp>
+#include <Rules/Static/DecideMemoryLayoutRule.hpp>
 #include <fmt/format.h>
-#include "Rules/Dynamic/StrawmanDynamicRule.hpp"
-#include "Rules/Static/DecideFieldMappings.hpp"
-#include "Rules/Static/DecideFieldOrder.hpp"
-#include "Rules/Static/DecideMemoryLayoutRule.hpp"
+#include <QueryCompiler.hpp>
+#include <Thread.hpp>
 
 namespace NES
 {
 
-
-AdaptiveOptimizer::AdaptiveOptimizer()
+AdaptiveOptimizer::AdaptiveOptimizer(
+    SharedPtr<LocalQueryCatalog> localQueryCatalog, SharedPtr<QueryCompilation::QueryCompiler> compiler, SharedPtr<NodeEngine> nodeEngine)
+    : localQueryCatalog(std::move(localQueryCatalog)), compiler(std::move(compiler)), nodeEngine(std::move(nodeEngine))
 {
     ruleSequence.push_back(StrawmanDynamicRule{});
     ruleSequence.push_back(DecideFieldOrder{});
     ruleSequence.push_back(DecideFieldMappings{});
     ruleSequence.push_back(DecideMemoryLayoutRule{});
-};
+
+    thread = Thread("Adaptive Optimizer", &AdaptiveOptimizer::start, this);
+}
+
+void AdaptiveOptimizer::reoptimize()
+{
+    for (auto id : localQueryCatalog->getAllQueryIds())
+    {
+        auto plan = localQueryCatalog->getPlan(id);
+        PlanStatistics statistics{};
+        auto result = reoptimize(plan, statistics);
+
+        if (!result.has_value())
+        {
+            NES_WARNING("Failed to reoptimize query {}: ", id, result.error())
+        }
+        auto request = std::make_unique<QueryCompilation::QueryCompilationRequest>(result.value());
+        auto compiled = compiler->compileQuery(std::move(request));
+        nodeEngine->replaceQueryPlan(std::move(compiled));
+        localQueryCatalog->replacePlan(id, result.value());
+    }
+}
 
 std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan plan, const PlanStatistics& planStatistics)
 {
@@ -49,6 +73,18 @@ std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan 
 
     NES_DEBUG("OPTIMIZED PLAN: {}", plan);
     return {plan};
+}
+
+void AdaptiveOptimizer::start(std::stop_token stop_token)
+{
+    NES_INFO("Started adaptive optimization loop");
+    while (!stop_token.stop_requested())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(REOPTIMIZATION_INTERVAL_MS));
+        NES_INFO("Trigger adaptive optimization");
+        reoptimize();
+    }
+    NES_INFO("Gracefully stopped adaptive optimizer loop");
 }
 
 
