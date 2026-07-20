@@ -17,6 +17,8 @@
 #include <string_view>
 #include <typeindex>
 #include <typeinfo>
+
+#include <Functions/LogicalFunction.hpp>
 #include <Operators/LogicalOperator.hpp>
 #include <Plans/LogicalPlan.hpp>
 #include <Rules/Rule.hpp>
@@ -40,6 +42,9 @@ public:
     [[nodiscard]] std::set<std::type_index> needs() const;
 
     bool operator==(const DecideJoinTypesRule& other) const;
+
+    [[nodiscard]] static bool canUseHashJoin(const LogicalFunction& joinFunction);
+    [[nodiscard]] LogicalOperator decideJoinTypes(const LogicalOperator& logicalOperator, const std::vector<LogicalOperator>& children) const;
 
 
 private:

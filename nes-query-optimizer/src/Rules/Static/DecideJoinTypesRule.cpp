@@ -45,12 +45,11 @@
 namespace NES
 {
 
-namespace
-{
+
 /// We set the join type to be a Hash-Join if the join function consists of solely functions that are FieldAccessLogicalFunction.
 /// To be more specific, we currently support only
 /// Otherwise, we use a NLJ.
-bool shallUseHashJoin(const LogicalFunction& joinFunction)
+bool DecideJoinTypesRule::canUseHashJoin(const LogicalFunction& joinFunction)
 {
     /// Checks if the logical function is allowed to be in our join function for a hash join
     auto allowedLogicalFunction = [](const LogicalFunction& logicalFunction)
@@ -60,8 +59,7 @@ bool shallUseHashJoin(const LogicalFunction& joinFunction)
             or logicalFunction.tryGetAs<FieldAccessLogicalFunction>().has_value();
     };
 
-    std::unordered_set<LogicalFunction> parentsOfJoinComparisons;
-    for (auto logicalFunction : BFSRange<LogicalFunction>(joinFunction))
+    for (auto logicalFunction : BFSRange(joinFunction))
     {
         if (not allowedLogicalFunction(logicalFunction))
         {
@@ -87,23 +85,23 @@ bool shallUseHashJoin(const LogicalFunction& joinFunction)
 }
 
 LogicalOperator
-decideJoinTypes(const LogicalOperator& logicalOperator, const std::vector<LogicalOperator>& children, const StreamJoinStrategy joinStrategy)
+DecideJoinTypesRule::decideJoinTypes(const LogicalOperator& logicalOperator, const std::vector<LogicalOperator>& children) const
 {
     auto traitSet = logicalOperator.getTraitSet();
     if (const auto joinOperator = logicalOperator.tryGetAs<JoinLogicalOperator>())
     {
-        if (joinStrategy == StreamJoinStrategy::NESTED_LOOP_JOIN)
+        if (this->joinStrategy == StreamJoinStrategy::NESTED_LOOP_JOIN)
         {
             tryInsert(traitSet, JoinImplementationTypeTrait{JoinImplementation::NESTED_LOOP_JOIN});
         }
-        else if (shallUseHashJoin(joinOperator.value()->getJoinFunction()))
+        else if (canUseHashJoin(joinOperator.value()->getJoinFunction()))
         {
             tryInsert(traitSet, JoinImplementationTypeTrait{JoinImplementation::HASH_JOIN});
         }
         else
         {
             tryInsert(traitSet, JoinImplementationTypeTrait{JoinImplementation::NESTED_LOOP_JOIN});
-            if (joinStrategy == StreamJoinStrategy::HASH_JOIN)
+            if (this->joinStrategy == StreamJoinStrategy::HASH_JOIN)
             {
                 NES_WARNING(
                     "Operator {} has not the HashJoinTrait, as the hash join is not supported for the join condition. Therefore, we "
@@ -118,7 +116,6 @@ decideJoinTypes(const LogicalOperator& logicalOperator, const std::vector<Logica
     }
     return logicalOperator.withChildren(children).withTraitSet(traitSet);
 }
-}
 
 /// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 std::set<std::type_index> DecideJoinTypesRule::needs() const
@@ -130,7 +127,7 @@ LogicalPlan DecideJoinTypesRule::apply(const LogicalPlan& queryPlan) const
 {
     PlanVisitor<> visitor{
         [this](const LogicalOperator& op, const std::vector<LogicalOperator>& children) -> PlanVisitor<>::UpResult
-        { return decideJoinTypes(op, children, this->joinStrategy); }};
+        { return decideJoinTypes(op, children); }};
 
     return visitor.apply(queryPlan);
 }
