@@ -16,6 +16,7 @@ add_subdirectory(Traits)
 add_subdirectory(Rules)
 
 add_source_files(nes-query-optimizer
+        LocalStatisticsCatalog.cpp
         QueryOptimizer.cpp
         PlanRewriteUtils.cpp
 )

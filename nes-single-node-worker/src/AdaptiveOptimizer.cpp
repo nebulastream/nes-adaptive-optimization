@@ -14,10 +14,11 @@
 #include <AdaptiveOptimizer.hpp>
 
 #include <fmt/format.h>
-#include "Rules/Dynamic/StrawmanDynamicRule.hpp"
-#include "Rules/Static/DecideFieldMappings.hpp"
-#include "Rules/Static/DecideFieldOrder.hpp"
-#include "Rules/Static/DecideMemoryLayoutRule.hpp"
+#include <Rules/Dynamic/StrawmanDynamicRule.hpp>
+#include <Rules/Static/DecideFieldMappings.hpp>
+#include <Rules/Static/DecideFieldOrder.hpp>
+#include <Rules/Static/DecideMemoryLayoutRule.hpp>
+#include <LocalStatisticsCatalog.hpp>
 
 namespace NES
 {
@@ -31,13 +32,13 @@ AdaptiveOptimizer::AdaptiveOptimizer()
     ruleSequence.push_back(DecideMemoryLayoutRule{});
 };
 
-std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan plan, const PlanStatistics& planStatistics)
+std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan plan, const LocalStatisticsCatalog& planStatistics)
 {
     NES_DEBUG("ORIGINAL PLAN: {}", plan);
 
     for (auto rule : ruleSequence)
     {
-        if (auto dynamic = rule.tryGetAs<DynamicRule<LogicalPlan, PlanStatistics>>())
+        if (auto dynamic = rule.tryGetAs<DynamicRule<LogicalPlan>>())
         {
             plan = (*dynamic.value())->apply(plan, planStatistics);
         }
