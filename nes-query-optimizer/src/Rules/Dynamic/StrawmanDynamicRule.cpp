@@ -27,7 +27,7 @@
 namespace NES
 {
 
-LogicalOperator straw(LogicalOperator op, const PlanStatistics& statistics)
+LogicalOperator straw(LogicalOperator op, const LocalStatisticsCatalog& statistics)
 {
     std::vector<LogicalOperator> newChildren;
     for (auto child : op.getChildren())
@@ -54,7 +54,7 @@ LogicalOperator straw(LogicalOperator op, const PlanStatistics& statistics)
     return op.withChildren({newChildren});
 }
 
-LogicalPlan StrawmanDynamicRule::apply(LogicalPlan queryPlan, PlanStatistics statistics) const
+LogicalPlan StrawmanDynamicRule::apply(LogicalPlan queryPlan, const LocalStatisticsCatalog& statistics) const
 {
     auto root = queryPlan.getRootOperators().at(0);
 

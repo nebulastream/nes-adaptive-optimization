@@ -19,6 +19,17 @@
 
 namespace NES
 {
-using PlanStatistics = std::unordered_map<OperatorId, int64_t>;
+
+class LocalStatisticsCatalog
+{
+public:
+    LocalStatisticsCatalog();
+
+    std::optional<int64_t> getOperatorStatistics(QueryId queryId, OperatorId operatorId);
+    void setOperatorStatistics(QueryId queryId, OperatorId operatorId, int64_t value);
+
+private:
+    std::unordered_map<QueryId, std::unordered_map<OperatorId, int64_t>> statistics;
+};
 
 }

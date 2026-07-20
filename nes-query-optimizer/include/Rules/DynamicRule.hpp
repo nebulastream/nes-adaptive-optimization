@@ -15,14 +15,15 @@
 #pragma once
 
 #include <Util/DynamicBase.hpp>
+#include <LocalStatisticsCatalog.hpp>
 
 namespace NES
 {
 
-template <typename U, typename S>
-class DynamicRule : public Castable<DynamicRule<U, S>>
+template <typename U>
+class DynamicRule : public Castable<DynamicRule<U>>
 {
 public:
-    [[nodiscard]] virtual U apply(U unit, S statistics) const = 0;
+    [[nodiscard]] virtual U apply(U unit, const LocalStatisticsCatalog& statistics) const = 0;
 };
 }
