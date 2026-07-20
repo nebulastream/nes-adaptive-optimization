@@ -40,6 +40,8 @@ public:
     grpc::Status AdaptiveOptimization(
         ::grpc::ServerContext* context, const ::AdaptiveOptimizationRequest* request, ::AdaptiveOptimizationResponse* response) override;
 
+    grpc::Status MockStatistics(grpc::ServerContext* context, const MockStatisticsRequest* request, MockStatisticsResponse* response) override;
+
     explicit GRPCServer(SingleNodeWorker&& delegate) : delegate(std::move(delegate)) { }
 
 private:

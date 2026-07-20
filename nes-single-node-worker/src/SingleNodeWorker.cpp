@@ -171,6 +171,35 @@ std::expected<void, Exception> SingleNodeWorker::adaptiveOptimization() noexcept
     return {};
 }
 
+std::expected<void, Exception> SingleNodeWorker::updateStatistics(std::string localQueryId, std::string distributedQueryId, uint64_t operatorId, int64_t value) noexcept
+{
+    CPPTRACE_TRY
+    {
+        NES_INFO("UpdateStatistics request localQueryId: {}, distributedQueryId: {}, operatorId: {}, value: {}", localQueryId, distributedQueryId, operatorId, value);
+
+        LocalQueryId lqi{localQueryId};
+        DistributedQueryId dqi{distributedQueryId};
+
+        auto queryId = QueryId::create(lqi, dqi);
+
+        if (localQueryCatalog.contains(queryId))
+        {
+            localStatisticsCatalog->setOperatorStatistics(queryId, OperatorId{operatorId}, value);
+        }
+        else
+        {
+            NES_DEBUG("No local query of id {} available", queryId);
+        }
+
+    }
+    CPPTRACE_CATCH(...)
+    {
+        return std::unexpected{wrapExternalException()};
+    }
+
+    return {};
+}
+
 std::expected<LocalQueryStatusSnapshot, Exception> SingleNodeWorker::getQueryStatus(QueryId queryId) const noexcept
 {
     CPPTRACE_TRY
