@@ -121,12 +121,8 @@ LogicalOperator applyRecur(const LogicalOperator& visiting)
     }();
 
     auto traitSet = visiting.getTraitSet();
-    auto success = traitSet.tryInsert(FieldOrderingTrait{unbind(outputOrder)});
-
-    if (success)
-        return visiting.withTraitSet(std::move(traitSet)).withChildren(newChildren);
-
-    return visiting.withChildren(newChildren);
+    traitSet.insertOrReplace(FieldOrderingTrait{unbind(outputOrder)});
+    return visiting.withTraitSet(std::move(traitSet)).withChildren(newChildren);
 }
 
 }
@@ -191,22 +187,13 @@ LogicalPlan DecideFieldOrder::apply(const LogicalPlan& queryPlan) const
             targetField.getFullyQualifiedName());
     }
     TraitSet rootChildTraitSet = newRootChild.getTraitSet();
-    auto success = rootChildTraitSet.tryInsert(FieldOrderingTrait{targetSchema});
-
-    if (success)
-    {
-        newRootChild = newRootChild.withTraitSet(TraitSet{rootChildTraitSet});
-    }
+    rootChildTraitSet.insertOrReplace(FieldOrderingTrait{targetSchema});
+    newRootChild = newRootChild.withTraitSet(TraitSet{rootChildTraitSet});
 
 
     auto rootTraitSet = rootSink->getTraitSet();
-    success = rootTraitSet.tryInsert(FieldOrderingTrait{Schema<UnqualifiedUnboundField, Ordered>{}});
-
-    if (success)
-    {
-        rootSink = rootSink.withTraitSet(rootTraitSet);
-    }
-    rootSink = rootSink.withChildren({newRootChild});
+    rootTraitSet.insertOrReplace(FieldOrderingTrait{Schema<UnqualifiedUnboundField, Ordered>{}});
+    rootSink = rootSink.withTraitSet(rootTraitSet).withChildren({newRootChild});
 
 
     return queryPlan.withRootOperators({std::move(rootSink)});

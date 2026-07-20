@@ -72,7 +72,8 @@ public:
 
     std::expected<void, Exception> adaptiveOptimization() noexcept;
 
-    std::expected<void, Exception> updateStatistics(std::string localQueryId, std::string distributedQueryId, uint64_t operatorId, int64_t value) noexcept;
+    std::expected<void, Exception>
+    updateStatistics(std::string localQueryId, std::string distributedQueryId, uint64_t operatorId, int64_t value) noexcept;
 
     /// Summary structure for query.
     [[nodiscard]] std::expected<LocalQueryStatusSnapshot, Exception> getQueryStatus(QueryId queryId) const noexcept;

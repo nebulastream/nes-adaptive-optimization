@@ -42,48 +42,6 @@
 namespace NES
 {
 
-namespace
-{
-/// We set the join type to be a Hash-Join if the join function consists of solely functions that are FieldAccessLogicalFunction.
-/// To be more specific, we currently support only
-/// Otherwise, we use a NLJ.
-bool shallUseHashJoin(const LogicalFunction& joinFunction)
-{
-    /// Checks if the logical function is allowed to be in our join function for a hash join
-    auto allowedLogicalFunction = [](const LogicalFunction& logicalFunction)
-    {
-        return logicalFunction.tryGetAs<AndLogicalFunction>().has_value() or logicalFunction.tryGetAs<EqualsLogicalFunction>().has_value()
-            or logicalFunction.tryGetAs<OrLogicalFunction>().has_value()
-            or logicalFunction.tryGetAs<FieldAccessLogicalFunction>().has_value();
-    };
-
-    std::unordered_set<LogicalFunction> parentsOfJoinComparisons;
-    for (auto logicalFunction : BFSRange<LogicalFunction>(joinFunction))
-    {
-        if (not allowedLogicalFunction(logicalFunction))
-        {
-            return false;
-        }
-
-        const auto anyChildIsLeaf
-            = std::ranges::any_of(logicalFunction.getChildren(), [](const LogicalFunction& child) { return child.getChildren().empty(); });
-        if (anyChildIsLeaf)
-        {
-            for (const auto& child : logicalFunction.getChildren())
-            {
-                if (not child.tryGetAs<FieldAccessLogicalFunction>().has_value())
-                {
-                    /// If the leaf is not a FieldAccessLogicalFunction, we need to use a NLJ
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
-}
-}
-
 const std::type_info& DecideJoinTypesRule::getType()
 {
     return typeid(DecideJoinTypesRule);
@@ -118,6 +76,44 @@ bool DecideJoinTypesRule::operator==(const DecideJoinTypesRule& other) const
     return this->joinStrategy == other.joinStrategy;
 }
 
+/// We set the join type to be a Hash-Join if the join function consists of solely functions that are FieldAccessLogicalFunction.
+/// To be more specific, we currently support only
+/// Otherwise, we use a NLJ.
+bool DecideJoinTypesRule::canUseHashJoin(const LogicalFunction& joinFunction)
+{
+    /// Checks if the logical function is allowed to be in our join function for a hash join
+    auto allowedLogicalFunction = [](const LogicalFunction& logicalFunction)
+    {
+        return logicalFunction.tryGetAs<AndLogicalFunction>().has_value() or logicalFunction.tryGetAs<EqualsLogicalFunction>().has_value()
+            or logicalFunction.tryGetAs<OrLogicalFunction>().has_value()
+            or logicalFunction.tryGetAs<FieldAccessLogicalFunction>().has_value();
+    };
+
+    for (auto logicalFunction : BFSRange(joinFunction))
+    {
+        if (not allowedLogicalFunction(logicalFunction))
+        {
+            return false;
+        }
+
+        const auto anyChildIsLeaf
+            = std::ranges::any_of(logicalFunction.getChildren(), [](const LogicalFunction& child) { return child.getChildren().empty(); });
+        if (anyChildIsLeaf)
+        {
+            for (const auto& child : logicalFunction.getChildren())
+            {
+                if (not child.tryGetAs<FieldAccessLogicalFunction>().has_value())
+                {
+                    /// If the leaf is not a FieldAccessLogicalFunction, we need to use a NLJ
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 LogicalOperator DecideJoinTypesRule::apply(const LogicalOperator& logicalOperator) const
 {
     const auto children = logicalOperator.getChildren()
@@ -129,7 +125,7 @@ LogicalOperator DecideJoinTypesRule::apply(const LogicalOperator& logicalOperato
         {
             tryInsert(traitSet, JoinImplementationTypeTrait{JoinImplementation::NESTED_LOOP_JOIN});
         }
-        else if (shallUseHashJoin(joinOperator.value()->getJoinFunction()))
+        else if (canUseHashJoin(joinOperator.value()->getJoinFunction()))
         {
             tryInsert(traitSet, JoinImplementationTypeTrait{JoinImplementation::HASH_JOIN});
         }
