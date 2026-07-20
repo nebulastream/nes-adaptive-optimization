@@ -13,3 +13,4 @@ SELECT VAL, TS, VAL + TS AS VAL2 FROM ENDLESS
    'test.txt' as "SINK".FILE_PATH,
    'localhost:8080' AS "SINK"."HOST"
 );
+SHOW QUERIES;
