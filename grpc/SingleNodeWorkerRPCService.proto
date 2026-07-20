@@ -25,6 +25,7 @@ service WorkerRPCService {
   rpc RequestStatus (WorkerStatusRequest) returns (WorkerStatusResponse) {}
 
   rpc AdaptiveOptimization (AdaptiveOptimizationRequest) returns (AdaptiveOptimizationResponse) {}
+  rpc MockStatistics (MockStatisticsRequest) returns (MockStatisticsResponse) {}
 }
 
 message StartQueryRequest {
@@ -100,5 +101,17 @@ message AdaptiveOptimizationRequest {
 }
 
 message AdaptiveOptimizationResponse {
+
+}
+
+
+message MockStatisticsRequest {
+  string distributedQueryId = 1;
+  string localQueryId = 2;
+  uint64 operatorId = 3;
+  int64 value = 4;
+}
+
+message MockStatisticsResponse {
 
 }
