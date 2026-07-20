@@ -77,6 +77,7 @@ SingleNodeWorker::SingleNodeWorker(const SingleNodeWorkerConfiguration& configur
     compiler = std::make_unique<QueryCompilation::QueryCompiler>(configuration.workerConfiguration.defaultQueryExecution);
     localQueryCatalog.clear();
     adaptiveOptimizer = std::make_unique<AdaptiveOptimizer>();
+    localStatisticsCatalog = std::make_shared<LocalStatisticsCatalog>();
 
     if (!configuration.dataAddress.getValue().empty())
     {
@@ -155,8 +156,7 @@ std::expected<void, Exception> SingleNodeWorker::adaptiveOptimization() noexcept
 {
     for (auto& plan : localQueryCatalog | std::views::values)
     {
-        PlanStatistics statistics{};
-        auto result = adaptiveOptimizer->reoptimize(plan, statistics);
+        auto result = adaptiveOptimizer->reoptimize(plan, *localStatisticsCatalog);
 
         if (!result.has_value())
         {

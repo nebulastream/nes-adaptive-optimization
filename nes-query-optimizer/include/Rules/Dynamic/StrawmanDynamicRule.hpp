@@ -22,11 +22,11 @@
 #include <Plans/LogicalPlan.hpp>
 #include <Rules/DynamicRule.hpp>
 #include <Rules/Rule.hpp>
-#include <Statistics.hpp>
+#include <LocalStatisticsCatalog.hpp>
 
 namespace NES
 {
-class StrawmanDynamicRule : public DynamicRule<LogicalPlan, PlanStatistics>
+class StrawmanDynamicRule : public DynamicRule<LogicalPlan>
 {
 public:
     static constexpr std::string_view NAME = "StrawmanDynamicRule";
@@ -36,7 +36,7 @@ public:
     [[nodiscard]] std::set<std::type_index> dependsOn() const;
     [[nodiscard]] std::set<std::type_index> requiredBy() const;
     [[nodiscard]] LogicalPlan apply(LogicalPlan queryPlan) const;
-    [[nodiscard]] LogicalPlan apply(LogicalPlan queryPlan, PlanStatistics statistics) const override;
+    [[nodiscard]] LogicalPlan apply(LogicalPlan queryPlan, const LocalStatisticsCatalog& statistics) const override;
     bool operator==(const StrawmanDynamicRule& other) const;
 };
 

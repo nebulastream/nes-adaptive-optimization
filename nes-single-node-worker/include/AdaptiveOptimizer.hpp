@@ -16,7 +16,7 @@
 
 #include <Rules/RuleManager.hpp>
 #include <Runtime/NodeEngine.hpp>
-#include <Statistics.hpp>
+#include <LocalStatisticsCatalog.hpp>
 
 namespace NES
 {
@@ -25,7 +25,7 @@ class AdaptiveOptimizer
 public:
     explicit AdaptiveOptimizer();
 
-    std::expected<LogicalPlan, Exception> reoptimize(LogicalPlan plan, const PlanStatistics& planStatistics);
+    std::expected<LogicalPlan, Exception> reoptimize(LogicalPlan plan, const LocalStatisticsCatalog& planStatistics);
 
 
 private:

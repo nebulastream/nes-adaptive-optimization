@@ -45,6 +45,7 @@ class SingleNodeWorker
     SharedPtr<NodeEngine> nodeEngine;
     UniquePtr<QueryCompilation::QueryCompiler> compiler;
     UniquePtr<AdaptiveOptimizer> adaptiveOptimizer;
+    SharedPtr<LocalStatisticsCatalog> localStatisticsCatalog;
     std::unordered_map<QueryId, LogicalPlan> localQueryCatalog;
     SingleNodeWorkerConfiguration configuration;
 
