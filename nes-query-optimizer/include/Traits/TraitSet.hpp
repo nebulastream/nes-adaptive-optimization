@@ -91,6 +91,14 @@ public:
         PRECONDITION(success, "Trait {} already present", NAMEOF_TYPE(TraitType));
     }
 
+    template <TraitConcept TraitType>
+    void insertOrReplace(TraitType trait)
+    {
+        traitMap.erase(typeid(TraitType));
+        const auto [iter, success] = traitMap.try_emplace(typeid(TraitType), std::move(trait));
+        PRECONDITION(success, "Failed to insert {}", NAMEOF_TYPE(TraitType));
+    }
+
     friend bool operator==(const TraitSet& lhs, const TraitSet& rhs);
 
     [[nodiscard]] auto begin() const { return std::views::values(traitMap).begin(); }

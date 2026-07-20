@@ -14,14 +14,13 @@
 
 #include <LocalStatisticsCatalog.hpp>
 
-namespace  NES
+namespace NES
 {
 
 LocalStatisticsCatalog::LocalStatisticsCatalog()
 {
     statistics.clear();
 }
-
 
 void LocalStatisticsCatalog::setOperatorStatistics(QueryId queryId, OperatorId operatorId, int64_t value)
 {
@@ -33,7 +32,7 @@ void LocalStatisticsCatalog::setOperatorStatistics(QueryId queryId, OperatorId o
     statistics[queryId][operatorId] = value;
 }
 
-std::optional<int64_t> LocalStatisticsCatalog::getOperatorStatistics(QueryId queryId, OperatorId operatorId)
+std::optional<int64_t> LocalStatisticsCatalog::getOperatorStatistics(QueryId queryId, OperatorId operatorId) const
 {
     if (auto queryIter = statistics.find(queryId); queryIter != statistics.end())
     {

@@ -224,16 +224,15 @@ GRPCServer::AdaptiveOptimization(grpc::ServerContext* context, const AdaptiveOpt
         context);
 }
 
-grpc::Status
-GRPCServer::MockStatistics(grpc::ServerContext* context, const MockStatisticsRequest* request, MockStatisticsResponse* )
+grpc::Status GRPCServer::MockStatistics(grpc::ServerContext* context, const MockStatisticsRequest* request, MockStatisticsResponse*)
 {
     return tryWithDefaultHandling(
-    [&]
-    {
-        delegate.updateStatistics(request->localqueryid(), request->distributedqueryid(), request->operatorid(), request->value());
-        return grpc::Status::OK;
-    },
-    context);
+        [&]
+        {
+            delegate.updateStatistics(request->localqueryid(), request->distributedqueryid(), request->operatorid(), request->value());
+            return grpc::Status::OK;
+        },
+        context);
 }
 
 }

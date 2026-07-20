@@ -13,11 +13,12 @@
 */
 #include <AdaptiveOptimizer.hpp>
 
-#include <fmt/format.h>
+#include <Rules/Dynamic/JoinTypeDynamicRule.hpp>
 #include <Rules/Dynamic/StrawmanDynamicRule.hpp>
 #include <Rules/Static/DecideFieldMappings.hpp>
 #include <Rules/Static/DecideFieldOrder.hpp>
 #include <Rules/Static/DecideMemoryLayoutRule.hpp>
+#include <fmt/format.h>
 #include <LocalStatisticsCatalog.hpp>
 
 namespace NES
@@ -26,17 +27,18 @@ namespace NES
 
 AdaptiveOptimizer::AdaptiveOptimizer()
 {
-    ruleSequence.push_back(StrawmanDynamicRule{});
-    ruleSequence.push_back(DecideFieldOrder{});
-    ruleSequence.push_back(DecideFieldMappings{});
-    ruleSequence.push_back(DecideMemoryLayoutRule{});
+    ruleSequence.emplace_back(JoinTypeDynamicRule{});
+
+    ruleSequence.emplace_back(DecideFieldOrder{});
+    ruleSequence.emplace_back(DecideFieldMappings{});
+    ruleSequence.emplace_back(DecideMemoryLayoutRule{});
 };
 
 std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan plan, const LocalStatisticsCatalog& planStatistics)
 {
-    NES_DEBUG("ORIGINAL PLAN: {}", plan);
+    NES_DEBUG("ORIGINAL PLAN: {}", explain(plan, ExplainVerbosity::Debug));
 
-    for (auto rule : ruleSequence)
+    for (const auto& rule : ruleSequence)
     {
         if (auto dynamic = rule.tryGetAs<DynamicRule<LogicalPlan>>())
         {
@@ -48,7 +50,7 @@ std::expected<LogicalPlan, Exception> AdaptiveOptimizer::reoptimize(LogicalPlan 
         }
     }
 
-    NES_DEBUG("OPTIMIZED PLAN: {}", plan);
+    NES_DEBUG("OPTIMIZED PLAN: {}", explain(plan, ExplainVerbosity::Debug));
     return {plan};
 }
 

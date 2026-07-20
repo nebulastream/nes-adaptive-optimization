@@ -25,7 +25,7 @@ class LocalStatisticsCatalog
 public:
     LocalStatisticsCatalog();
 
-    std::optional<int64_t> getOperatorStatistics(QueryId queryId, OperatorId operatorId);
+    std::optional<int64_t> getOperatorStatistics(QueryId queryId, OperatorId operatorId) const;
     void setOperatorStatistics(QueryId queryId, OperatorId operatorId, int64_t value);
 
 private:
