@@ -241,7 +241,7 @@ grpc::Status GRPCServer::MockStatistics(grpc::ServerContext* context, const Mock
     return tryWithDefaultHandling(
         [&]
         {
-            delegate.updateStatistics(request->localqueryid(), request->distributedqueryid(), request->operatorid(), request->value());
+            delegate.updateStatistics(request->localqueryidprefix(), request->operatorid(), request->value());
             return grpc::Status::OK;
         },
         context);

@@ -111,10 +111,9 @@ message AdaptiveOptimizationResponse {
 
 
 message MockStatisticsRequest {
-  string distributedQueryId = 1;
-  string localQueryId = 2;
-  uint64 operatorId = 3;
-  int64 value = 4;
+  string localQueryIdPrefix = 1;
+  uint64 operatorId = 2;
+  int64 value = 3;
 }
 
 message MockStatisticsResponse {

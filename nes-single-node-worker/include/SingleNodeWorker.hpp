@@ -34,6 +34,8 @@
 #include <SingleNodeWorkerConfiguration.hpp>
 #include <WorkerStatus.hpp>
 
+#include <LocalQueryCatalog.hpp>
+
 namespace NES
 {
 
@@ -51,7 +53,7 @@ class SingleNodeWorker
     UniquePtr<QueryCompilation::QueryCompiler> compiler;
     UniquePtr<AdaptiveOptimizer> adaptiveOptimizer;
     SharedPtr<LocalStatisticsCatalog> localStatisticsCatalog;
-    std::unordered_map<QueryId, LogicalPlan> localQueryCatalog;
+    LocalQueryCatalog localQueryCatalog;
     SingleNodeWorkerConfiguration configuration;
 
 public:
@@ -77,8 +79,7 @@ public:
 
     std::expected<void, Exception> adaptiveOptimization() noexcept;
 
-    std::expected<void, Exception>
-    updateStatistics(std::string localQueryId, std::string distributedQueryId, uint64_t operatorId, int64_t value) noexcept;
+    std::expected<void, Exception> updateStatistics(std::string localQueryIdPrefix, uint64_t operatorId, int64_t value) noexcept;
 
     /// Summary structure for query.
     [[nodiscard]] std::expected<LocalQueryStatusSnapshot, Exception> getQueryStatus(QueryId queryId) const noexcept;

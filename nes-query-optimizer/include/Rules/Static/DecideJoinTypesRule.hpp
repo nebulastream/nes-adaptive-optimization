@@ -44,7 +44,8 @@ public:
     bool operator==(const DecideJoinTypesRule& other) const;
 
     [[nodiscard]] static bool canUseHashJoin(const LogicalFunction& joinFunction);
-    [[nodiscard]] LogicalOperator decideJoinTypes(const LogicalOperator& logicalOperator, const std::vector<LogicalOperator>& children) const;
+    [[nodiscard]] LogicalOperator
+    decideJoinTypes(const LogicalOperator& logicalOperator, const std::vector<LogicalOperator>& children) const;
 
 
 private:
