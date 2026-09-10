@@ -1,0 +1,22 @@
+services:
+  worker-1:
+    image: ubuntu:latest
+    command: -- --grpc=worker-1:8080 --data_address=worker-1:9090
+    entrypoint: ./nes-single-node-worker
+    working_dir: /worker
+    volumes:
+      - ../../cmake-build-debug/nes-single-node-worker/:/worker
+      - ./data:/data
+  worker-2:
+    image: ubuntu:latest
+    command: -- --grpc=worker-2:8080 --data_address=worker-2:9090
+    entrypoint: ./nes-single-node-worker
+    working_dir: /worker
+    volumes:
+      - ../../cmake-build-debug/nes-single-node-worker/:/worker
+  repl:
+    image: ubuntu:latest
+    entrypoint: sleep infinity
+    working_dir: /apps
+    volumes:
+      - ../../cmake-build-debug/nes-frontend/apps/:/apps
