@@ -68,6 +68,8 @@ private:
     bool quoteStrings;
     std::string fieldDelimiter;
     std::string tupleDelimiter;
+    /// If set, every tuple gets a trailing 'emittedtime' column holding the unix time in ms at which it was formatted
+    bool addEmittedTime;
 };
 }
 
@@ -90,8 +92,13 @@ struct ConfigParametersCSV
         "\n",
         [](const std::unordered_map<std::string, std::string>& config) { return DescriptorConfig::tryGet(TUPLE_DELIMITER, config); }};
 
+    static inline const DescriptorConfig::ConfigParameter<bool> ADD_EMITTED_TIME{
+        "ADD_EMITTED_TIME",
+        false,
+        [](const std::unordered_map<std::string, std::string>& config) { return DescriptorConfig::tryGet(ADD_EMITTED_TIME, config); }};
+
     static inline std::unordered_map<std::string, DescriptorConfig::ConfigParameterContainer> parameterMap
-        = DescriptorConfig::createConfigParameterContainerMap(QUOTE_STRINGS, FIELD_DELIMITER, TUPLE_DELIMITER);
+        = DescriptorConfig::createConfigParameterContainerMap(QUOTE_STRINGS, FIELD_DELIMITER, TUPLE_DELIMITER, ADD_EMITTED_TIME);
 };
 }
 
