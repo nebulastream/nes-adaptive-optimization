@@ -73,6 +73,8 @@ private:
     std::string fieldDelimiter;
     std::string tupleDelimiter;
     bool quoteStrings;
+    /// If set, every tuple gets a trailing 'emittedtime' column holding the unix time in ms at which it was formatted
+    bool addEmittedTime;
 };
 }
 

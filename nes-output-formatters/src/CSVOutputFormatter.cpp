@@ -14,6 +14,7 @@
 
 #include <CSVOutputFormatter.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -74,6 +75,19 @@ void writeValue(
     written += amountWritten;
     currentRemainingSize -= amountWritten;
 }
+
+/// Writes the field delimiter followed by the current system time as unix timestamp in milliseconds
+uint64_t writeEmittedTime(
+    int8_t* bufferStartingAddress,
+    const uint64_t remainingSpace,
+    const char* fieldDelimiter,
+    TupleBuffer* tupleBuffer,
+    AbstractBufferProvider* bufferProvider)
+{
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::string formatted = fmt::format("{}{}", fieldDelimiter, nowMs);
+    return writeValueToBuffer(formatted.c_str(), formatted.size(), remainingSpace, tupleBuffer, bufferProvider, bufferStartingAddress);
+}
 }
 
 namespace
@@ -90,13 +104,18 @@ const ConfigField<std::string> FIELD_DELIMITER{
 
 const ConfigField<std::string> TUPLE_DELIMITER{
     Identifier::parse("TUPLE_DELIMITER"), "A string to be used for delimiting tuples.", std::string{"\n"}};
+
+const ConfigField<bool> ADD_EMITTED_TIME{
+    Identifier::parse("ADD_EMITTED_TIME"),
+    "A boolean, where true appends an 'emittedtime' column holding the unix time in ms at which the tuple was formatted.",
+    false};
 /// NOLINTEND(bugprone-throwing-static-initialization)
 
 }
 
 Schema<QualifiedErasedConfigField, Ordered> CSVOutputFormatter::getConfigSchema()
 {
-    return createConfigSchema(Identifier::parse("CSV_OUTPUT_FORMATTER"), QUOTE_STRINGS, FIELD_DELIMITER, TUPLE_DELIMITER);
+    return createConfigSchema(Identifier::parse("CSV_OUTPUT_FORMATTER"), QUOTE_STRINGS, FIELD_DELIMITER, TUPLE_DELIMITER, ADD_EMITTED_TIME);
 }
 
 std::expected<CSVOutputFormatterConfig, Exception> CSVOutputFormatterConfig::fromConfig(const InstantiatedConfig& config)
@@ -105,7 +124,8 @@ std::expected<CSVOutputFormatterConfig, Exception> CSVOutputFormatterConfig::fro
         .quoteStrings = config.get(QUOTE_STRINGS),
         .fieldDelimiter = config.get(FIELD_DELIMITER),
         .tupleDelimiter = config.get(TUPLE_DELIMITER),
-        .valueSerializers = config.get(OutputFormatterDescriptor::VALUE_SERIALIZERS)};
+        .valueSerializers = config.get(OutputFormatterDescriptor::VALUE_SERIALIZERS),
+        .addEmittedTime = config.get(ADD_EMITTED_TIME)};
 }
 
 CSVOutputFormatter::CSVOutputFormatter(const std::vector<Record::RecordFieldIdentifier>& fieldNames, const CSVOutputFormatterConfig& config)
@@ -113,6 +133,7 @@ CSVOutputFormatter::CSVOutputFormatter(const std::vector<Record::RecordFieldIden
     , fieldDelimiter(config.fieldDelimiter)
     , tupleDelimiter(config.tupleDelimiter)
     , quoteStrings(config.quoteStrings)
+    , addEmittedTime(config.addEmittedTime)
 {
     serializerTypes[DataType::Type::UINT8] = "DefaultUINT8";
     serializerTypes[DataType::Type::UINT16] = "DefaultUINT16";
@@ -186,6 +207,21 @@ nautilus::val<uint64_t> CSVOutputFormatter::writeFormattedValue(
             quoteStrings);
     }
 
+    /// Append the emitted time as an additional column after the last field of the record
+    const bool isLastField = fieldIndex + 1 == fieldNames.size();
+    if (addEmittedTime && isLastField)
+    {
+        const nautilus::val<uint64_t> amountWritten = nautilus::invoke(
+            writeEmittedTime,
+            fieldPointer + written,
+            currentRemainingSize,
+            nautilus::val<const char*>{fieldDelimiter.c_str()},
+            recordBuffer.getReference(),
+            bufferProvider);
+        written += amountWritten;
+        currentRemainingSize -= amountWritten;
+    }
+
     /// Write either the field delimiter or the tuple delimiter, depending on the field index
     const nautilus::val<const char*> delimiter{(fieldIndex + 1 == fieldNames.size() ? tupleDelimiter : fieldDelimiter).c_str()};
 
@@ -206,7 +242,11 @@ nautilus::val<uint64_t> CSVOutputFormatter::writeFormattedValue(
 
 std::ostream& operator<<(std::ostream& out, const CSVOutputFormatter& format)
 {
-    return out << fmt::format("CSVOutputFormatter(Field Delimiter: {}, Tuple Delimiter: {})", format.fieldDelimiter, format.tupleDelimiter);
+    return out << fmt::format(
+               "CSVOutputFormatter(Field Delimiter: {}, Tuple Delimiter: {}, Add Emitted Time: {})",
+               format.fieldDelimiter,
+               format.tupleDelimiter,
+               format.addEmittedTime);
 }
 
 /// NOLINTNEXTLINE(performance-unnecessary-value-param)

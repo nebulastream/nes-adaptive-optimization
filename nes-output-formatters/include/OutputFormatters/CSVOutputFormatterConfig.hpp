@@ -30,6 +30,8 @@ struct CSVOutputFormatterConfig
     std::string fieldDelimiter;
     std::string tupleDelimiter;
     std::string valueSerializers;
+    /// If set, every tuple gets a trailing 'emittedtime' column holding the unix time in ms at which it was formatted
+    bool addEmittedTime;
 
     static std::expected<CSVOutputFormatterConfig, Exception> fromConfig(const InstantiatedConfig& config);
 };

@@ -35,6 +35,7 @@
 #include <Configurations/InstantiatedConfigValue.hpp>
 #include <DataTypes/UnboundField.hpp>
 #include <Identifiers/Identifier.hpp>
+#include <OutputFormatters/CSVOutputFormatterConfig.hpp>
 #include <Runtime/TupleBuffer.hpp>
 #include <Schema/Schema.hpp>
 #include <Schema/SchemaFwd.hpp>
@@ -67,7 +68,19 @@ const ConfigField<std::filesystem::path> FILE_PATH{
 
 const ConfigField<bool> APPEND{
     Identifier::parse("APPEND"), "A boolean, where TRUE indicates to append to the specified file, and false to overwrite it.", false};
+
 /// NOLINTEND(bugprone-throwing-static-initialization)
+
+/// The CSV output formatter appends an 'emittedtime' column if ADD_EMITTED_TIME is set (see CSVOutputFormatterConfig.hpp)
+bool csvFormatterAddsEmittedTime(const SinkDescriptor& sinkDescriptor)
+{
+    const auto& formatterDescriptor = sinkDescriptor.getOutputFormatterDescriptor();
+    if (formatterDescriptor.getOutputFormatterType() != Identifier::parse("CSV"))
+    {
+        return false;
+    }
+    return formatterDescriptor.getConfig().getAs<CSVOutputFormatterConfig>().addEmittedTime;
+}
 
 }
 
@@ -88,6 +101,7 @@ FileSink::FileSink(BackpressureController backpressureController, const FileSink
     , isOpen(false)
     , schemaFormatter(
           SchemaFormatter(NES::get<std::shared_ptr<const Schema<UnqualifiedUnboundField, Ordered>>>(sinkDescriptor.getSchema())))
+    , addEmittedTimeColumn(csvFormatterAddsEmittedTime(sinkDescriptor))
 {
 }
 
@@ -129,7 +143,12 @@ void FileSink::start(PipelineExecutionContext&)
     /// Write the schema to the file, if it is empty.
     if (stream->tellp() == 0)
     {
-        const auto schemaStr = schemaFormatter.getFormattedSchema();
+        auto schemaStr = schemaFormatter.getFormattedSchema();
+        if (addEmittedTimeColumn)
+        {
+            /// The formatted schema ends with a newline, insert the additional column before it
+            schemaStr.insert(schemaStr.size() - 1, ",emittedtime:UINT64:NOT_NULLABLE");
+        }
         stream->write(schemaStr.c_str(), static_cast<int64_t>(schemaStr.length()));
     }
 }
