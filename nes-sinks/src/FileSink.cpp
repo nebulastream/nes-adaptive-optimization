@@ -31,6 +31,7 @@
 
 #include <Configurations/Descriptor.hpp>
 #include <DataTypes/UnboundField.hpp>
+#include <Identifiers/Identifier.hpp>
 #include <Runtime/TupleBuffer.hpp>
 #include <Schema/Schema.hpp>
 #include <Schema/SchemaFwd.hpp>
@@ -39,12 +40,32 @@
 #include <SinksParsing/BufferIterator.hpp>
 #include <SinksParsing/SchemaFormatter.hpp>
 #include <Util/Logger/Logger.hpp>
+#include <Util/Strings.hpp>
 #include <BackpressureChannel.hpp>
 #include <ErrorHandling.hpp>
 #include <PipelineExecutionContext.hpp>
 
 namespace NES
 {
+
+namespace
+{
+/// The CSV output formatter appends an 'emittedtime' column if ADD_EMITTED_TIME is set (see CSVOutputFormatter.hpp)
+bool csvFormatterAddsEmittedTime(const SinkDescriptor& sinkDescriptor)
+{
+    if (sinkDescriptor.getFormatType() != "CSV")
+    {
+        return false;
+    }
+    const auto formatterConfig = sinkDescriptor.getOutputFormatterConfig();
+    const auto option = formatterConfig.find(Identifier::parse("ADD_EMITTED_TIME"));
+    if (option == formatterConfig.end())
+    {
+        return false;
+    }
+    return from_chars<bool>(option->second).value_or(false);
+}
+}
 
 FileSink::FileSink(BackpressureController backpressureController, const SinkDescriptor& sinkDescriptor)
     : Sink(std::move(backpressureController))
@@ -53,6 +74,7 @@ FileSink::FileSink(BackpressureController backpressureController, const SinkDesc
     , isOpen(false)
     , schemaFormatter(
           SchemaFormatter(NES::get<std::shared_ptr<const Schema<UnqualifiedUnboundField, Ordered>>>(sinkDescriptor.getSchema())))
+    , addEmittedTimeColumn(csvFormatterAddsEmittedTime(sinkDescriptor))
 {
 }
 
@@ -94,7 +116,12 @@ void FileSink::start(PipelineExecutionContext&)
     /// Write the schema to the file, if it is empty.
     if (stream->tellp() == 0)
     {
-        const auto schemaStr = schemaFormatter.getFormattedSchema();
+        auto schemaStr = schemaFormatter.getFormattedSchema();
+        if (addEmittedTimeColumn)
+        {
+            /// The formatted schema ends with a newline, insert the additional column before it
+            schemaStr.insert(schemaStr.size() - 1, ",emittedtime:UINT64:NOT_NULLABLE");
+        }
         stream->write(schemaStr.c_str(), static_cast<int64_t>(schemaStr.length()));
     }
 }
