@@ -14,6 +14,7 @@
 
 #include <CSVOutputFormatter.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -81,6 +82,19 @@ uint64_t writeVarsized(
     return writeValueToBuffer(stringFormattedValue.c_str(), remainingSpace, tupleBuffer, bufferProvider, bufferStartingAddress);
 }
 
+/// Writes the field delimiter followed by the current system time as unix timestamp in milliseconds
+uint64_t writeEmittedTime(
+    int8_t* bufferStartingAddress,
+    const uint64_t remainingSpace,
+    const char* fieldDelimiter,
+    TupleBuffer* tupleBuffer,
+    AbstractBufferProvider* bufferProvider)
+{
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::string formatted = fmt::format("{}{}", fieldDelimiter, nowMs);
+    return writeValueToBuffer(formatted.c_str(), remainingSpace, tupleBuffer, bufferProvider, bufferStartingAddress);
+}
+
 void writeValue(
     const VarVal& value,
     const DataType& fieldType,
@@ -141,6 +155,7 @@ CSVOutputFormatter::CSVOutputFormatter(
     , quoteStrings(descriptor.getFromConfig(OutputFormatterConfig::ConfigParametersCSV::QUOTE_STRINGS))
     , fieldDelimiter(descriptor.getFromConfig(OutputFormatterConfig::ConfigParametersCSV::FIELD_DELIMITER))
     , tupleDelimiter(descriptor.getFromConfig(OutputFormatterConfig::ConfigParametersCSV::TUPLE_DELIMITER))
+    , addEmittedTime(descriptor.getFromConfig(OutputFormatterConfig::ConfigParametersCSV::ADD_EMITTED_TIME))
 {
 }
 
@@ -181,6 +196,21 @@ nautilus::val<uint64_t> CSVOutputFormatter::writeFormattedValue(
         writeValue(value, fieldType, fieldPointer, recordBuffer, bufferProvider, quoteStrings, written, currentRemainingSize);
     }
 
+    /// Append the emitted time as an additional column after the last field of the record
+    const bool isLastField = fieldIndex == fieldNames.size() - 1;
+    if (addEmittedTime && isLastField)
+    {
+        const nautilus::val<uint64_t> amountWritten = nautilus::invoke(
+            writeEmittedTime,
+            fieldPointer + written,
+            currentRemainingSize,
+            nautilus::val<const char*>{fieldDelimiter.c_str()},
+            recordBuffer.getReference(),
+            bufferProvider);
+        written += amountWritten;
+        currentRemainingSize -= amountWritten;
+    }
+
     /// Write either the field delimiter or the tuple delimiter, depending on the field index
     const auto delimiter = nautilus::select(
         nautilus::val<uint64_t>{fieldIndex} == nautilus::val<uint64_t>{fieldNames.size()} - 1,
@@ -196,10 +226,11 @@ nautilus::val<uint64_t> CSVOutputFormatter::writeFormattedValue(
 std::ostream& operator<<(std::ostream& out, const CSVOutputFormatter& format)
 {
     return out << fmt::format(
-               "CSVOutputFormatter(Quote Strings: {}, Field Delimiter: {}, Tuple Delimiter: {})",
+               "CSVOutputFormatter(Quote Strings: {}, Field Delimiter: {}, Tuple Delimiter: {}, Add Emitted Time: {})",
                format.quoteStrings,
                format.fieldDelimiter,
-               format.tupleDelimiter);
+               format.tupleDelimiter,
+               format.addEmittedTime);
 }
 
 DescriptorConfig::Config CSVOutputFormatter::validateAndFormat(std::unordered_map<std::string, std::string> config)

@@ -62,6 +62,8 @@ private:
     bool isOpen;
     folly::Synchronized<std::ofstream> outputFileStream;
     SchemaFormatter schemaFormatter;
+    /// True if the CSV output formatter appends an 'emittedtime' column, so the schema header has to include it as well
+    bool addEmittedTimeColumn;
 };
 
 struct ConfigParametersFile
