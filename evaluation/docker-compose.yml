@@ -8,6 +8,7 @@ services:
       - ../cmake-build-debug/nes-single-node-worker/:/worker
       - ./data:/data
   worker-2:
+    profiles: ['all']
     image: ubuntu:latest
     command: -- --grpc=worker-2:8080 --data_address=worker-2:9090
     entrypoint: ./nes-single-node-worker
@@ -38,3 +39,6 @@ services:
       - ./data:/data
       - ./scripts:/scripts
       - ../grpc:/grpc
+networks:
+  default:
+    name: nes-eval
