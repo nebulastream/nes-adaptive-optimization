@@ -14,6 +14,7 @@
 
 #include <Sinks/NetworkSink.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -120,16 +121,32 @@ NetworkSink::NetworkSink(
 void NetworkSink::start(PipelineExecutionContext&)
 {
     this->server = sender_instance(thisConnection);
+
+    /// Holding the lock across the registration prevents two concurrently starting sinks from registering the same channel twice.
+    const auto channels = channelsLock.wlock();
+    if (auto itr = channels->find(channelId); itr != channels->end())
+    {
+        this->channel = copyPtr(itr->second);
+        /// Continue the sequence numbers where the previous sinks on this channel stopped.
+        this->sequenceNumberOffsets = channel->highestSentSequenceNumbersLock.copy();
+        NES_DEBUG("Reusing sender channel {} with sequence number offsets for {} origins", channelId, sequenceNumberOffsets.size());
+        return;
+    }
+
     const NetworkServiceOptions options{
         .sender_queue_size = static_cast<uint32_t>(senderQueueSize),
         .max_pending_acks = static_cast<uint32_t>(maxPendingAcks),
         .receiver_queue_size = 0,
     };
-    this->channel = register_sender_channel(*server.value(), connectionAddr, rust::String(channelId), options);
+
+    auto sharedChannel
+        = std::make_shared<SharedSenderChannel>(register_sender_channel(*server.value(), connectionAddr, rust::String(channelId), options));
+    channels->emplace(channelId, sharedChannel);
+    this->channel = std::move(sharedChannel);
     NES_DEBUG("Sender channel registered: {} (SENDER_QUEUE_SIZE: {}, MAX_PENDING_ACKS: {})", channelId, senderQueueSize, maxPendingAcks);
 }
 
-void NetworkSink::stop(PipelineExecutionContext& pec)
+void NetworkSink::stop(PipelineExecutionContext&)
 {
     /// A pipeline can be stopped without ever having been started, e.g. when the deployment of a query is cancelled because another
     /// pipeline failed to start. Nothing was registered, so there is nothing to flush or close.
@@ -139,31 +156,73 @@ void NetworkSink::stop(PipelineExecutionContext& pec)
         return;
     }
 
-    if (!closed)
-    {
-        INVARIANT(backpressureHandler.empty(), "BackpressureHandler is not empty");
+    /// if (!closed)
+    /// {
+    ///     INVARIANT(backpressureHandler.empty(), "BackpressureHandler is not empty");
+    ///
+    ///     switch (flush_sender_channel(*this->channel->channel))
+    ///     {
+    ///         case FlushResult::Flushed: {
+    ///             break;
+    ///         }
+    ///         case FlushResult::Pending: {
+    ///             /// The sender network service has pending buffers to send, keep the pipeline alive by emitting an empty buffer
+    ///             pec.repeatTask({}, BACKPRESSURE_RETRY_INTERVAL);
+    ///             return;
+    ///         }
+    ///         case FlushResult::Failed: {
+    ///             /// Already sent buffers are lost. Stopping regularly would silently drop them.
+    ///             this->closed = true;
+    ///             throw CannotWriteToSink("NetworkSink channel failed permanently");
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// NES_DEBUG("Closing Sender channel {}", channelId);
+    /// close_sender_channel(std::move(this->channel->channel));
+    NES_DEBUG("Sender channel {} closed", channelId);
+}
 
-        switch (flush_sender_channel(*this->channel.value()))
-        {
-            case FlushResult::Flushed: {
-                break;
-            }
-            case FlushResult::Pending: {
-                /// The sender network service has pending buffers to send, keep the pipeline alive by emitting an empty buffer
-                pec.repeatTask({}, BACKPRESSURE_RETRY_INTERVAL);
-                return;
-            }
-            case FlushResult::Failed: {
-                /// Already sent buffers are lost. Stopping regularly would silently drop them.
-                this->closed = true;
-                throw CannotWriteToSink("NetworkSink channel failed permanently");
-            }
-        }
+SendResult NetworkSink::sendBuffer(const TupleBuffer& buffer)
+{
+    const auto originId = buffer.getOriginId();
+    const auto offset = sequenceNumberOffsets.contains(originId) ? sequenceNumberOffsets.at(originId) : 0;
+    const auto sequenceNumber = buffer.getSequenceNumber().getRawValue() + offset;
+
+    /// Set buffer header
+    const SerializedTupleBufferHeader metadata{
+        .sequence_number = sequenceNumber,
+        .origin_id = originId.getRawValue(),
+        .chunk_number = buffer.getChunkNumber().getRawValue(),
+        .number_of_tuples = buffer.getNumberOfTuples(),
+        .watermark = buffer.getWatermark().getRawValue(),
+        .last_chunk = buffer.isLastChunk()};
+
+    /// Set child buffers
+    std::vector<rust::Slice<const uint8_t>> children;
+    children.reserve(buffer.getNumberOfChildBuffers());
+    for (size_t childIdx = 0; childIdx < buffer.getNumberOfChildBuffers(); ++childIdx)
+    {
+        auto childBuffer = buffer.loadChildBuffer(ChildBufferIndex(childIdx));
+        auto childMemory = childBuffer.getAvailableMemoryArea<const uint8_t>();
+        const auto usedChildBytes = childBuffer.getNumberOfTuples();
+        const auto childPayload
+            = (usedChildBytes > 0 and usedChildBytes <= childMemory.size()) ? childMemory.subspan(0, usedChildBytes) : childMemory;
+        children.emplace_back(childPayload);
     }
 
-    NES_DEBUG("Closing Sender channel {}", channelId);
-    close_sender_channel(*std::move(this->channel));
-    NES_DEBUG("Sender channel {} closed", channelId);
+    std::span usedBufferMemory(buffer.getAvailableMemoryArea<const uint8_t>().data(), buffer.getNumberOfTuples() * tupleSize);
+    /// Set data and send over the network
+    const auto sendResult
+        = send_buffer(*channel->channel, metadata, rust::Slice(usedBufferMemory), rust::Slice<const rust::Slice<const uint8_t>>(children));
+
+    if (sendResult == SendResult::Ok)
+    {
+        const auto highestSentSequenceNumbers = channel->highestSentSequenceNumbersLock.wlock();
+        auto& highestForOrigin = highestSentSequenceNumbers->at(originId);
+        highestForOrigin = std::max(highestForOrigin, sequenceNumber);
+    }
+    return sendResult;
 }
 
 void NetworkSink::execute(const TupleBuffer& inputBuffer, PipelineExecutionContext& pec)
@@ -180,33 +239,7 @@ void NetworkSink::execute(const TupleBuffer& inputBuffer, PipelineExecutionConte
     auto currentBuffer = std::optional(inputBuffer);
     while (currentBuffer)
     {
-        /// Set buffer header
-        const SerializedTupleBufferHeader metadata{
-            .sequence_number = currentBuffer->getSequenceNumber().getRawValue(),
-            .origin_id = currentBuffer->getOriginId().getRawValue(),
-            .chunk_number = currentBuffer->getChunkNumber().getRawValue(),
-            .number_of_tuples = currentBuffer->getNumberOfTuples(),
-            .watermark = currentBuffer->getWatermark().getRawValue(),
-            .last_chunk = currentBuffer->isLastChunk()};
-
-        /// Set child buffers
-        std::vector<rust::Slice<const uint8_t>> children;
-        children.reserve(currentBuffer->getNumberOfChildBuffers());
-        for (size_t childIdx = 0; childIdx < currentBuffer->getNumberOfChildBuffers(); ++childIdx)
-        {
-            auto childBuffer = currentBuffer->loadChildBuffer(ChildBufferIndex(childIdx));
-            auto childMemory = childBuffer.getAvailableMemoryArea<const uint8_t>();
-            const auto usedChildBytes = childBuffer.getNumberOfTuples();
-            const auto childPayload
-                = (usedChildBytes > 0 and usedChildBytes <= childMemory.size()) ? childMemory.subspan(0, usedChildBytes) : childMemory;
-            children.emplace_back(childPayload);
-        }
-
-        std::span usedBufferMemory(
-            currentBuffer->getAvailableMemoryArea<const uint8_t>().data(), currentBuffer->getNumberOfTuples() * tupleSize);
-        /// Set data and send over the network
-        const auto sendResult = send_buffer(
-            *channel.value(), metadata, rust::Slice(usedBufferMemory), rust::Slice<const rust::Slice<const uint8_t>>(children));
+        const auto sendResult = sendBuffer(*currentBuffer);
         switch (sendResult)
         {
             case SendResult::Closed: {
