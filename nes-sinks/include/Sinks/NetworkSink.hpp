@@ -22,11 +22,14 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
 #include <Configurations/Descriptor.hpp>
+#include <Identifiers/Identifiers.hpp>
 #include <Runtime/TupleBuffer.hpp>
 #include <Sinks/BackpressureHandler.hpp>
 #include <Sinks/Sink.hpp>
 #include <Sinks/SinkDescriptor.hpp>
+#include <Util/Pointers.hpp>
 #include <folly/Synchronized.h>
 #include <nes-network-bindings/lib.h>
 #include <rust/cxx.h>
@@ -64,11 +67,30 @@ protected:
     std::ostream& toString(std::ostream& str) const override;
 
 private:
+    /// A sender channel that outlives a single NetworkSink, e.g. when the query plan is replaced during adaptive re-optimization.
+    /// A replacing plan restarts its sources, so the sequence numbers of an origin start again at SequenceNumber::INITIAL.
+    /// To present a single continuous stream to the receiver, the channel tracks the highest sequence number sent per origin and
+    /// every new sink continues from there.
+    struct SharedSenderChannel
+    {
+        explicit SharedSenderChannel(rust::Box<SenderDataChannel> channel) : channel(std::move(channel)) { }
+
+        rust::Box<SenderDataChannel> channel;
+        folly::Synchronized<std::unordered_map<OriginId, uint64_t>> highestSentSequenceNumbersLock;
+    };
+
+    static inline folly::Synchronized<std::unordered_map<std::string, SharedPtr<SharedSenderChannel>>> channelsLock;
+
+    /// Sends the buffer with its sequence number shifted by the offset of its origin.
+    SendResult sendBuffer(const TupleBuffer& buffer);
+
     size_t tupleSize;
     folly::Synchronized<std::vector<TupleBuffer>> bufferBacklog;
     BackpressureHandler backpressureHandler;
     std::optional<rust::Box<SenderNetworkService>> server;
-    std::optional<rust::Box<SenderDataChannel>> channel;
+    SharedPtr<SharedSenderChannel> channel;
+    /// Snapshot of the channel's highestSentSequenceNumbers taken in start(). Read-only afterwards.
+    std::unordered_map<OriginId, uint64_t> sequenceNumberOffsets;
     std::string channelId;
     std::string connectionAddr;
     std::string thisConnection;
