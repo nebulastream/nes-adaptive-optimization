@@ -29,6 +29,7 @@
 #include <Sources/SourceDescriptor.hpp>
 #include <Util/Logger/Logger.hpp>
 #include <Util/UUID.hpp>
+#include <folly/Synchronized.h>
 #include <nes-network-bindings/lib.h>
 #include <rust/cxx.h>
 
@@ -63,6 +64,11 @@ public:
     [[nodiscard]] std::ostream& toString(std::ostream& str) const override;
 
 private:
+    /// Receiver channels outlive a single NetworkSource, e.g. when the query plan is replaced during adaptive re-optimization.
+    /// The registry holds one handle per channel that is never received on; it only keeps the channel registered.
+    /// Every NetworkSource receives on its own handle, so stopping one source does not interrupt the others.
+    static inline folly::Synchronized<std::unordered_map<std::string, rust::Box<ReceiverDataChannel>>> channelsLock;
+
     bool fillBuffer(TupleBuffer& tupleBuffer, size_t& numReceivedBytes);
 
     std::string channelId;
