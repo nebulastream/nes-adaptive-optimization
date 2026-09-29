@@ -50,22 +50,35 @@ std::ostream& NetworkSource::toString(std::ostream& str) const
 void NetworkSource::open(std::shared_ptr<AbstractBufferProvider> provider)
 {
     this->bufferProvider = std::move(provider);
-    const NetworkServiceOptions options{
-        .sender_queue_size = 0,
-        .max_pending_acks = 0,
-        .receiver_queue_size = static_cast<uint32_t>(receiverQueueSize),
-    };
-    this->channel = register_receiver_channel(*receiverServer, rust::String(channelId), options);
-    NES_DEBUG("Receiver channel registered: {}", channelId);
+
+    /// Holding the lock across the registration prevents two concurrently opening sources from registering the same channel twice.
+    const auto channels = channelsLock.wlock();
+    auto itr = channels->find(channelId);
+    if (itr == channels->end())
+    {
+        const NetworkServiceOptions options{
+            .sender_queue_size = 0,
+            .max_pending_acks = 0,
+            .receiver_queue_size = static_cast<uint32_t>(receiverQueueSize),
+        };
+        itr = channels->emplace(channelId, register_receiver_channel(*receiverServer, rust::String(channelId), options)).first;
+        NES_DEBUG("Receiver channel registered: {}", channelId);
+    }
+    else
+    {
+        NES_DEBUG("Reusing receiver channel {}", channelId);
+    }
+    this->channel = clone_receiver_channel(*itr->second);
 }
 
 Source::FillTupleBufferResult NetworkSource::fillTupleBuffer(TupleBuffer& tupleBuffer, const std::stop_token& stopToken)
 {
-    PRECONDITION(channel, "Network Source was opened multiple times");
+    PRECONDITION(channel.has_value(), "Network Source was not opened");
     PRECONDITION(bufferProvider, "Network Source was opened without a buffer provider");
     TupleBufferBuilder builder(tupleBuffer, *bufferProvider);
 
-    /// If the source is requested to shutdown the network channel is closed, which will interrupt the call to receive_buffer.
+    /// If the source is requested to shutdown, this source's handle is detached, which interrupts the call to receive_buffer.
+    /// The channel stays open for other sources, e.g. the source of a replacing query plan.
     const std::stop_callback callback(stopToken, [this] { interrupt_receive(**channel); });
 
     if (receive_buffer(**channel, builder))
@@ -73,7 +86,7 @@ Source::FillTupleBufferResult NetworkSource::fillTupleBuffer(TupleBuffer& tupleB
         return FillTupleBufferResult::withBytes(tupleBuffer.getNumberOfTuples()); /// Received one buffer
     }
 
-    /// Receive Buffer has failed, which means that the queue was closed.
+    /// Receive Buffer has failed, which means that the queue was closed or this handle was detached.
     /// The SourceThread logic will figure out if the queue was closed by an external source (i.e. the other side of the network connection)
     /// or because of a stop_request.
     return FillTupleBufferResult::eos(); /// End of Stream
@@ -82,8 +95,9 @@ Source::FillTupleBufferResult NetworkSource::fillTupleBuffer(TupleBuffer& tupleB
 void NetworkSource::close()
 {
     PRECONDITION(channel.has_value(), "Network Source was closed multiple times or never opened");
-    close_receiver_channel(std::move(*channel));
-    NES_DEBUG("Receiver channel closed: {}", channelId);
+    /// Only drops this source's handle. The channel stays registered for replacing sources.
+    channel.reset();
+    NES_DEBUG("Receiver channel handle released: {}", channelId);
 }
 
 DescriptorConfig::Config NetworkSource::validateAndFormat(std::unordered_map<std::string, std::string> config)

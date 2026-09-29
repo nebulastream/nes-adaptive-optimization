@@ -97,6 +97,9 @@ pub mod ffi {
             receiver_channel: &ReceiverDataChannel,
             builder: Pin<&mut TupleBufferBuilder>,
         ) -> Result<bool>;
+        fn clone_receiver_channel(
+            receiver_channel: &ReceiverDataChannel,
+        ) -> Box<ReceiverDataChannel>;
         fn interrupt_receive(receiver_channel: &ReceiverDataChannel);
 
         fn close_receiver_channel(channel: Box<ReceiverDataChannel>);
@@ -401,14 +404,20 @@ fn receive_buffer(
     Ok(true)
 }
 
-// The `interrupt_receive` and `close_receiver_channel` are identical because,
-// currently, there is no requirement to keep the channel alive after a `receive_buffer` has been
-// interrupted as the network source will shut down and never try to receive a buffer again.
-// And closing the channel is the easiest option to interrupt a pending `receive_buffer`.
-fn interrupt_receive(channel: &ReceiverDataChannel) {
-    channel.chan.close();
+/// Creates another handle on the same channel. Each handle can be interrupted independently via `interrupt_receive`.
+fn clone_receiver_channel(channel: &ReceiverDataChannel) -> Box<ReceiverDataChannel> {
+    Box::new(ReceiverDataChannel {
+        chan: Box::pin(channel.chan.new_handle()),
+    })
 }
 
+/// Interrupts a pending `receive_buffer` on this handle only. The channel stays open for other handles,
+/// so a replacing network source can continue to receive from it.
+fn interrupt_receive(channel: &ReceiverDataChannel) {
+    channel.chan.detach();
+}
+
+/// Closes the channel for all handles.
 // CXX requires the usage of Boxed types
 #[allow(clippy::boxed_local)]
 fn close_receiver_channel(channel: Box<ReceiverDataChannel>) {

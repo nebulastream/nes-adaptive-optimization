@@ -14,11 +14,13 @@
 
 use crate::channel::Communication;
 use crate::protocol::*;
+use futures::future::Either;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info_span, warn};
 
 use super::control::*;
@@ -26,8 +28,14 @@ use super::control::*;
 /// Timeout for graceful tokio runtime shutdown
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// A handle to the data queue of a registered channel.
+///
+/// Multiple handles can read from the same queue (see [`ReceiverChannel::new_handle`]), e.g. when a network source
+/// is replaced during adaptive re-optimization while the channel itself stays registered.
 pub struct ReceiverChannel {
     queue: async_channel::Receiver<TupleBuffer>,
+    /// Interrupts receives on this handle only; other handles on the same queue are not affected.
+    detached: CancellationToken,
 }
 
 pub enum ReceiverChannelResult {
@@ -36,14 +44,37 @@ pub enum ReceiverChannelResult {
     Error(Error),
 }
 impl ReceiverChannel {
+    /// Closes the queue for all handles.
     pub fn close(&self) {
         self.queue.close();
     }
+
+    /// Interrupts pending and future receives on this handle without closing the queue.
+    pub fn detach(&self) {
+        self.detached.cancel();
+    }
+
+    /// Creates another handle on the same queue with its own detach token.
+    pub fn new_handle(&self) -> ReceiverChannel {
+        ReceiverChannel {
+            queue: self.queue.clone(),
+            detached: CancellationToken::new(),
+        }
+    }
+
+    /// Blocks until a buffer is available, the queue is closed, or this handle is detached.
+    ///
+    /// The receive future of `async_channel` only takes a buffer from the queue when it completes, so interrupting it
+    /// by detaching never loses a buffer. `select` polls the detach token first, so a detached handle never takes
+    /// another buffer.
     pub fn receive(&self) -> ReceiverChannelResult {
-        let Ok(buffer) = self.queue.recv_blocking() else {
-            return ReceiverChannelResult::Closed;
-        };
-        ReceiverChannelResult::Ok(buffer)
+        let detached = std::pin::pin!(self.detached.cancelled());
+        let recv = std::pin::pin!(self.queue.recv());
+        match futures::executor::block_on(futures::future::select(detached, recv)) {
+            Either::Left(_) => ReceiverChannelResult::Closed,
+            Either::Right((Ok(buffer), _)) => ReceiverChannelResult::Ok(buffer),
+            Either::Right((Err(_), _)) => ReceiverChannelResult::Closed,
+        }
     }
 }
 
@@ -126,6 +157,7 @@ impl<C: Communication + 'static> NetworkService<C> {
             .map_err(|_| "Networking Service was stopped")?;
         Ok(ReceiverChannel {
             queue: data_queue_receiver,
+            detached: CancellationToken::new(),
         })
     }
 
@@ -139,5 +171,72 @@ impl<C: Communication + 'static> NetworkService<C> {
             .ok_or("Networking Service was stopped")?;
         runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    fn buffer(sequence_number: u64) -> TupleBuffer {
+        TupleBuffer {
+            sequence_number,
+            origin_id: 1,
+            watermark: 0,
+            chunk_number: 1,
+            number_of_tuples: 0,
+            last_chunk: true,
+            data: vec![],
+            child_buffers: vec![],
+        }
+    }
+
+    fn channel() -> (async_channel::Sender<TupleBuffer>, ReceiverChannel) {
+        let (sender, queue) = async_channel::bounded(8);
+        (
+            sender,
+            ReceiverChannel {
+                queue,
+                detached: CancellationToken::new(),
+            },
+        )
+    }
+
+    fn sequence_number(result: ReceiverChannelResult) -> Option<u64> {
+        match result {
+            ReceiverChannelResult::Ok(buffer) => Some(buffer.sequence_number),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn detached_handle_does_not_affect_other_handles() {
+        let (sender, root) = channel();
+        let old = Arc::new(root.new_handle());
+
+        let receiving = {
+            let old = old.clone();
+            thread::spawn(move || matches!(old.receive(), ReceiverChannelResult::Closed))
+        };
+        // Give the old handle time to block in receive.
+        thread::sleep(Duration::from_millis(50));
+        old.detach();
+        assert!(
+            receiving.join().expect("receiving thread panicked"),
+            "detached receive must return Closed"
+        );
+
+        // The queue is still open and the buffer sent after the detach goes to the new handle, not the detached one.
+        sender
+            .send_blocking(buffer(1))
+            .expect("queue must still be open");
+        assert!(matches!(old.receive(), ReceiverChannelResult::Closed));
+        let new = root.new_handle();
+        assert_eq!(sequence_number(new.receive()), Some(1));
+
+        // Closing the queue ends the stream for all handles.
+        root.close();
+        assert!(matches!(new.receive(), ReceiverChannelResult::Closed));
     }
 }

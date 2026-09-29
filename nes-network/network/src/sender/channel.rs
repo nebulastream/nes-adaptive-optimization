@@ -205,9 +205,6 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> ChannelHandler<R, W> {
         match response {
             DataChannelResponse::Close => {
                 info!("Channel Closed by other receiver");
-                return Err(ErrorOrStatus::Status(
-                    ChannelHandlerStatus::ClosedByOtherSide,
-                ));
             }
             DataChannelResponse::NAckData(seq) => {
                 if let Some(write) = self.wait_for_ack.remove(&seq) {

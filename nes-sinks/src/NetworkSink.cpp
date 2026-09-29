@@ -151,7 +151,7 @@ SendResult NetworkSink::sendBuffer(const TupleBuffer& buffer)
     if (sendResult == SendResult::Ok)
     {
         const auto highestSentSequenceNumbers = channel->highestSentSequenceNumbersLock.wlock();
-        auto& highestForOrigin = highestSentSequenceNumbers->at(originId);
+        auto& highestForOrigin = (*highestSentSequenceNumbers)[originId];
         highestForOrigin = std::max(highestForOrigin, sequenceNumber);
     }
     return sendResult;
