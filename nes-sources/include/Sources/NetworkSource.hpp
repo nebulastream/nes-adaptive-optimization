@@ -22,6 +22,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <Configurations/ConfigField.hpp>
 #include <Configurations/InstantiatedConfigValue.hpp>
@@ -30,6 +31,7 @@
 #include <Schema/Schema.hpp>
 #include <Schema/SchemaFwd.hpp>
 #include <Sources/Source.hpp>
+#include <folly/Synchronized.h>
 #include <nes-network-bindings/lib.h>
 #include <rust/cxx.h>
 #include <ErrorHandling.hpp>
@@ -73,6 +75,11 @@ public:
     [[nodiscard]] std::ostream& toString(std::ostream& str) const override;
 
 private:
+    /// Receiver channels outlive a single NetworkSource, e.g. when the query plan is replaced during adaptive re-optimization.
+    /// The registry holds one handle per channel that is never received on; it only keeps the channel registered.
+    /// Every NetworkSource receives on its own handle, so stopping one source does not interrupt the others.
+    static inline folly::Synchronized<std::unordered_map<std::string, rust::Box<ReceiverDataChannel>>> channelsLock;
+
     std::string channelId;
     size_t receiverQueueSize;
     std::optional<rust::Box<ReceiverDataChannel>> channel;
