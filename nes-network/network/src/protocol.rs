@@ -101,9 +101,19 @@ pub enum ControlChannelResponse {
     OkChannelResponse(ConnectionIdentifier),
     DenyChannelResponse,
 }
+/// Identifies a drain. A marker carries the id of the drain it belongs to, which allows the receiving side to
+/// match it against the drain it was told to expect.
+pub type DrainId = u64;
+
 #[derive(Debug)]
 pub enum DataChannelRequest {
     Data(TupleBuffer),
+    /// The sender has been drained. All data sent before the marker belongs to the drained plan. The sender
+    /// closes the channel right after the marker.
+    Marker(DrainId),
+    /// The sender leaves the channel without ending the stream. The receiver keeps the channel registered,
+    /// so a new sender can attach to it.
+    Detach,
     Close,
 }
 
@@ -116,6 +126,9 @@ pub type OriginSequenceNumber = (u64, u64, u64);
 pub enum DataChannelResponse {
     AckData(OriginSequenceNumber),
     NAckData(OriginSequenceNumber),
+    /// The receiver leaves the channel without ending the stream. Every buffer that has not been acknowledged
+    /// before the `Detach` was not consumed and remains with the sender.
+    Detach,
     Close,
 }
 
@@ -148,8 +161,10 @@ impl Debug for TupleBuffer {
 /// Frame layout (the length prefix is added by the `LengthDelimitedCodec`):
 ///
 /// ```text
-/// Close: u8 tag = 0
-/// Data:  u8 tag = 1, u64 sequence_number, u64 origin_id, u64 watermark, u64 chunk_number, u64 number_of_tuples,
+/// Close:  u8 tag = 0
+/// Marker: u8 tag = 2, u64 drain_id
+/// Detach: u8 tag = 3
+/// Data:   u8 tag = 1, u64 sequence_number, u64 origin_id, u64 watermark, u64 chunk_number, u64 number_of_tuples,
 ///        u8 last_chunk, u32 data_len, u32 child_count, data bytes, child_count * (u32 child_len, child bytes)
 /// ```
 #[derive(Debug, Default)]
@@ -157,6 +172,9 @@ pub struct RawDataRequestCodec;
 
 const TAG_CLOSE: u8 = 0;
 const TAG_DATA: u8 = 1;
+const TAG_MARKER: u8 = 2;
+const TAG_DETACH: u8 = 3;
+const MARKER_LEN: usize = 1 + 8;
 /// tag + 5 * u64 + last_chunk + data_len + child_count
 const DATA_HEADER_LEN: usize = 1 + 5 * 8 + 1 + 4 + 4;
 
@@ -177,6 +195,13 @@ impl Serializer<DataChannelRequest> for RawDataRequestCodec {
     ) -> std::result::Result<Bytes, Self::Error> {
         match item {
             DataChannelRequest::Close => Ok(Bytes::from_static(&[TAG_CLOSE])),
+            DataChannelRequest::Detach => Ok(Bytes::from_static(&[TAG_DETACH])),
+            DataChannelRequest::Marker(drain_id) => {
+                let mut out = BytesMut::with_capacity(MARKER_LEN);
+                out.put_u8(TAG_MARKER);
+                out.put_u64_le(*drain_id);
+                Ok(out.freeze())
+            }
             DataChannelRequest::Data(buffer) => {
                 let payload_len = buffer.data.len()
                     + buffer
@@ -220,7 +245,14 @@ impl Deserializer<DataChannelRequest> for RawDataRequestCodec {
             return Err(invalid_data("empty data channel frame"));
         }
         match src.get_u8() {
-            TAG_CLOSE => Ok(DataChannelRequest::Close),
+            TAG_CLOSE if src.is_empty() => Ok(DataChannelRequest::Close),
+            TAG_DETACH if src.is_empty() => Ok(DataChannelRequest::Detach),
+            TAG_MARKER if src.len() == MARKER_LEN - 1 => {
+                Ok(DataChannelRequest::Marker(src.get_u64_le()))
+            }
+            TAG_CLOSE | TAG_DETACH | TAG_MARKER => {
+                Err(invalid_data("control frame has an invalid length"))
+            }
             TAG_DATA => {
                 if src.len() < DATA_HEADER_LEN - 1 {
                     return Err(invalid_data("truncated data channel header"));
@@ -531,6 +563,53 @@ mod raw_codec_tests {
             roundtrip(&DataChannelRequest::Close).unwrap(),
             DataChannelRequest::Close
         ));
+    }
+
+    #[test]
+    fn marker_roundtrip() {
+        for drain_id in [0, 1, 42, u64::MAX] {
+            let DataChannelRequest::Marker(decoded) =
+                roundtrip(&DataChannelRequest::Marker(drain_id)).unwrap()
+            else {
+                panic!("expected marker");
+            };
+            assert_eq!(decoded, drain_id);
+        }
+    }
+
+    #[test]
+    fn detach_roundtrip() {
+        assert!(matches!(
+            roundtrip(&DataChannelRequest::Detach).unwrap(),
+            DataChannelRequest::Detach
+        ));
+    }
+
+    #[test]
+    fn control_frames_with_invalid_length_are_rejected() {
+        let mut codec = RawDataRequestCodec;
+        let marker = Pin::new(&mut codec)
+            .serialize(&DataChannelRequest::Marker(7))
+            .unwrap();
+        // truncated and overlong markers
+        for len in 1..marker.len() {
+            assert!(
+                Pin::new(&mut codec)
+                    .deserialize(&BytesMut::from(&marker[..len]))
+                    .is_err()
+            );
+        }
+        let mut overlong = BytesMut::from(&marker[..]);
+        overlong.put_u8(0);
+        assert!(Pin::new(&mut codec).deserialize(&overlong).is_err());
+        // close and detach must not carry a payload
+        for tag in [TAG_CLOSE, TAG_DETACH] {
+            assert!(
+                Pin::new(&mut codec)
+                    .deserialize(&BytesMut::from(&[tag, 0][..]))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
