@@ -142,7 +142,6 @@ fn marker_is_delivered_after_the_data_and_ends_the_stream() {
     }
     assert_eq!(receive(&receiver_channel), Received::Marker(42));
     assert_eq!(receive(&receiver_channel), Received::Closed);
-
 }
 
 #[test]

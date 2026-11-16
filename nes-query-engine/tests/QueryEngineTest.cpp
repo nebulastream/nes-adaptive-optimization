@@ -245,6 +245,60 @@ TEST_F(QueryEngineTest, singleQueryWithExternalStop)
     EXPECT_TRUE(verifyIdentifier(buffers[0], 1));
 }
 
+/// All pipelines of a query share the drain state of its ExecutableQueryPlan, and a drain configured while the query is running is visible
+/// to them, e.g., when they are stopped.
+TEST_F(QueryEngineTest, pipelinesShareTheDrainStateOfTheirQuery)
+{
+    TestingHarness test;
+    auto builder = test.buildNewQuery();
+    auto source = builder.addSource();
+    auto pipeline = builder.addPipeline({source});
+    auto sink = builder.addSink({pipeline});
+    auto query = test.addNewQuery(std::move(builder));
+    const auto drainState = query->drainState;
+
+    auto ctrl = test.sourceControls[source];
+    auto pipelineCtrl = test.pipelineControls[pipeline];
+    auto sinkCtrl = test.sinkControls[sink];
+
+    test.stats.expect(
+        ExpectStats::QueryStart(1),
+        ExpectStats::QueryStop(1),
+        ExpectStats::QueryStopRequest(0),
+        ExpectStats::PipelineStart(2),
+        ExpectStats::PipelineStop(2),
+        ExpectStats::TaskExecutionStart(4), /// (1 data buffer + EoS watermark buffer) * (P1 + Sink)
+        ExpectStats::TaskExecutionComplete(4),
+        ExpectStats::TaskEmit(2));
+
+    test.expectQueryStatusEvents(test.queryId(0), {QueryStatus::Started, QueryStatus::Running, QueryStatus::Stopped});
+    test.expectSourceTermination(test.queryId(0), source, QueryTerminationType::Graceful);
+
+    test.start();
+    {
+        test.startQuery(std::move(query));
+        ASSERT_TRUE(test.waitForQepRunning(test.queryId(0), DEFAULT_LONG_AWAIT_TIMEOUT));
+        ASSERT_TRUE(ctrl->waitUntilOpened());
+
+        ctrl->injectData(identifiableData(1), NUMBER_OF_TUPLES_PER_BUFFER);
+        ASSERT_TRUE(sinkCtrl->waitForNumberOfReceivedBuffersOrMore(1));
+        EXPECT_EQ(pipelineCtrl->drainStateInExecute.load(), drainState.get());
+        EXPECT_EQ(sinkCtrl->drainStateInExecute.load(), drainState.get());
+
+        ASSERT_TRUE(drainState->configure(
+            DrainConfiguration{.drainId = DrainId(7), .stopLocalSources = true, .expectedUpstreamMarkers = 0, .sinkModes = {}}));
+        ctrl->injectEoS();
+    }
+    ASSERT_TRUE(sinkCtrl->waitForStop());
+    ASSERT_TRUE(test.waitForQepTermination(test.queryId(0), DEFAULT_LONG_AWAIT_TIMEOUT));
+    test.stop();
+
+    EXPECT_EQ(pipelineCtrl->drainStateInStop.load(), drainState.get());
+    EXPECT_EQ(sinkCtrl->drainStateInStop.load(), drainState.get());
+    EXPECT_EQ(pipelineCtrl->drainIdInStop.load(), DrainId(7));
+    EXPECT_EQ(sinkCtrl->drainIdInStop.load(), DrainId(7));
+}
+
 /// System Stop: Meaning the Query was stopped internally from the query manager via the stop query
 TEST_F(QueryEngineTest, singleQueryWithSystemStop)
 {

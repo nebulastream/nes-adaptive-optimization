@@ -104,6 +104,10 @@ protected:
             operatorHandlers = &opHandlers;
         }
 
+        [[nodiscard]] DrainState& getDrainState() override { return drainState; }
+
+        DrainState drainState;
+
         void repeatTask(const TupleBuffer&, std::chrono::milliseconds) override { INVARIANT(false, "This function should not be called"); }
 
         ///NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members) lifetime is ensured by the fixture

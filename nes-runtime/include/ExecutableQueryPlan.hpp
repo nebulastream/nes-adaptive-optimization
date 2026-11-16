@@ -22,6 +22,7 @@
 #include <Sources/SourceProvider.hpp>
 #include <Util/Logger/Formatter.hpp>
 #include <CompiledQueryPlan.hpp>
+#include <DrainState.hpp>
 #include <QueryId.hpp>
 
 namespace NES
@@ -40,6 +41,8 @@ struct ExecutableQueryPlan
     QueryId queryId;
     std::vector<std::shared_ptr<ExecutablePipeline>> pipelines;
     std::vector<SourceWithSuccessor> sources;
+    /// Shared with the running query, so the drain of the query can be configured while it is running.
+    std::shared_ptr<DrainState> drainState = std::make_shared<DrainState>();
     friend std::ostream& operator<<(std::ostream& os, const ExecutableQueryPlan& executableQueryPlan);
 };
 }

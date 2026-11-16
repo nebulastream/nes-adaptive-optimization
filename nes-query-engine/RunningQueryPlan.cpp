@@ -88,10 +88,13 @@ std::shared_ptr<RunningQueryPlanNode> RunningQueryPlanNode::create(
     std::unique_ptr<ExecutablePipelineStage> stage,
     std::function<void(Exception)> unregisterWithError,
     CallbackRef planRef,
-    CallbackRef setupCallback)
+    CallbackRef setupCallback,
+    std::shared_ptr<DrainState> drainState)
 {
+    PRECONDITION(drainState != nullptr, "A pipeline requires the drain state of its query");
     auto node = std::shared_ptr<RunningQueryPlanNode>(
-        new RunningQueryPlanNode(pipelineId, std::move(successors), std::move(stage), std::move(unregisterWithError), std::move(planRef)),
+        new RunningQueryPlanNode(
+            pipelineId, std::move(successors), std::move(stage), std::move(unregisterWithError), std::move(planRef), std::move(drainState)),
         RunningQueryPlanNodeDeleter{.emitter = emitter, .queryId = queryId});
     emitter.emitPipelineStart(
         queryId,
@@ -155,7 +158,8 @@ std::
             std::move(pipeline->stage),
             unregisterWithError,
             terminationCallbackRef,
-            pipelineSetupCallbackRef);
+            pipelineSetupCallbackRef,
+            queryPlan.drainState);
         pipelines.emplace_back(node);
         cache[pipeline] = std::move(node);
         return cache[pipeline];

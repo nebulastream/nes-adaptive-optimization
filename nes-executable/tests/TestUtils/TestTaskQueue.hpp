@@ -110,8 +110,11 @@ public:
 
     void repeatTask(const TupleBuffer&, std::chrono::milliseconds) override;
 
+    [[nodiscard]] DrainState& getDrainState() override { return drainState; }
+
     WorkerThreadId workerThreadId;
     PipelineId pipelineId;
+    DrainState drainState;
 
 private:
     std::function<void()> repeatTaskCallback;

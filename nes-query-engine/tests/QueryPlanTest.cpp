@@ -155,6 +155,11 @@ struct TestPipelineExecutionContext : PipelineExecutionContext
     MOCK_METHOD((std::unordered_map<OperatorHandlerId, std::shared_ptr<OperatorHandler>>&), getOperatorHandlers, (), (override));
     MOCK_METHOD(void, setOperatorHandlers, ((std::unordered_map<OperatorHandlerId, std::shared_ptr<OperatorHandler>>&)), (override));
     MOCK_METHOD(bool, emitBuffer, (const TupleBuffer&, ContinuationPolicy), (override));
+
+    /// Not mocked: the test stages record the drain state they see, which a mocked reference would not support.
+    DrainState& getDrainState() override { return drainState; }
+
+    DrainState drainState;
 };
 
 struct TerminatePipelineArgs
@@ -444,10 +449,20 @@ TEST_F(QueryPlanTest, RunningQueryNodeSetup)
 
     /// Build chain of two pipelines. Verify that on construction of a RunningQueryPlan node a setup task has been submitted
     const auto testQid = randomQueryId();
-    auto sink = RunningQueryPlanNode::create(testQid, PipelineId(1), emitter, {}, std::move(stage2), [](auto) { }, expirationRef, setupRef);
+    const auto drainState = std::make_shared<DrainState>();
+    auto sink = RunningQueryPlanNode::create(
+        testQid, PipelineId(1), emitter, {}, std::move(stage2), [](auto) { }, expirationRef, setupRef, drainState);
     EXPECT_THAT(*setups, testing::SizeIs(1));
     auto pipeline = RunningQueryPlanNode::create(
-        testQid, PipelineId(2), emitter, {std::move(sink)}, std::move(stage1), [](auto) { }, std::move(expirationRef), std::move(setupRef));
+        testQid,
+        PipelineId(2),
+        emitter,
+        {std::move(sink)},
+        std::move(stage1),
+        [](auto) { },
+        std::move(expirationRef),
+        std::move(setupRef),
+        drainState);
     EXPECT_THAT(*setups, testing::SizeIs(2));
 
     /// Run all setup tasks.

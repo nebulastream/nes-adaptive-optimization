@@ -103,6 +103,10 @@ class EmitPhysicalOperatorTest : public Testing::BaseUnitTest
             operatorHandlers = &opHandlers;
         }
 
+        [[nodiscard]] DrainState& getDrainState() override { return drainState; }
+
+        DrainState drainState;
+
         MockedPipelineContext(folly::Synchronized<std::vector<TupleBuffer>>& buffers, std::shared_ptr<BufferManager> bufferManager)
             : buffers(buffers), bufferManager(std::move(bufferManager))
         {

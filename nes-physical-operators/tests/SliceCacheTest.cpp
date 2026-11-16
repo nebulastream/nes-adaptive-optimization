@@ -177,6 +177,12 @@ public:
             std::unreachable();
         }
 
+        [[nodiscard]] DrainState& getDrainState() override
+        {
+            INVARIANT(false, "This function should not be called");
+            std::unreachable();
+        }
+
         explicit MockedPipelineContext(std::shared_ptr<AbstractBufferProvider> bufferManager) : bufferManager(std::move(bufferManager)) { }
 
         void repeatTask(const TupleBuffer&, std::chrono::milliseconds) override { INVARIANT(false, "This function should not be called"); }

@@ -13,5 +13,6 @@
 add_source_files(nes-executable
         BackpressureChannel.cpp
         CompiledQueryPlan.cpp
+        DrainState.cpp
         Pipeline.cpp
 )

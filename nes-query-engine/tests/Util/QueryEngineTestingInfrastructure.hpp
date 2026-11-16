@@ -55,6 +55,7 @@
 #include <gtest/gtest-assertion-result.h>
 #include <gtest/gtest.h>
 #include <CompiledQueryPlan.hpp>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
 #include <ExecutablePipelineStage.hpp>
 #include <ExecutableQueryPlan.hpp>
@@ -214,6 +215,10 @@ public:
     std::atomic<size_t> throwOnNthInvocation = -1;
     std::atomic<size_t> repeatCount = 0;
     std::atomic<size_t> repeatCountDuringStop = 0;
+    /// The drain state the pipeline saw during its last execution and its stop, and the drain id configured at the time of its stop.
+    std::atomic<DrainState*> drainStateInExecute = nullptr;
+    std::atomic<DrainState*> drainStateInStop = nullptr;
+    std::atomic<DrainId> drainIdInStop = INVALID_DRAIN_ID;
 
     std::promise<void> start;
     std::promise<void> startEntered;
@@ -288,6 +293,11 @@ struct TestPipeline final : ExecutablePipelineStage
 
     void stop(PipelineExecutionContext& pec) override
     {
+        controller->drainStateInStop = &pec.getDrainState();
+        if (const auto configuration = pec.getDrainState().getConfiguration())
+        {
+            controller->drainIdInStop = configuration->drainId;
+        }
         std::this_thread::sleep_for(controller->stopDuration.load());
         if (controller->failOnStop)
         {
@@ -312,6 +322,7 @@ struct TestPipeline final : ExecutablePipelineStage
 
     void execute(const TupleBuffer& inputTupleBuffer, PipelineExecutionContext& pipelineExecutionContext) override
     {
+        controller->drainStateInExecute = &pipelineExecutionContext.getDrainState();
         if (controller->invocations.fetch_add(1) + 1 == controller->throwOnNthInvocation)
         {
             throw Exception("I should throw here.", 9999);
@@ -375,6 +386,10 @@ struct TestSinkController
     std::atomic<size_t> invocations = 0;
     std::atomic<size_t> repeatCount = 0;
     std::atomic<size_t> repeatCountDuringStop = 0;
+    /// The drain state the sink saw during its last execution and its stop, and the drain id configured at the time of its stop.
+    std::atomic<DrainState*> drainStateInExecute = nullptr;
+    std::atomic<DrainState*> drainStateInStop = nullptr;
+    std::atomic<DrainId> drainIdInStop = INVALID_DRAIN_ID;
 
     BackpressureController backpressureController;
 
@@ -397,6 +412,7 @@ public:
 
     void execute(const TupleBuffer& inputBuffer, PipelineExecutionContext& pipelineExecutionContext) override
     {
+        controller->drainStateInExecute = &pipelineExecutionContext.getDrainState();
         controller->insertBuffer(deepCopyBuffer(inputBuffer, *bufferProvider));
 
         /// Handle repeat functionality
@@ -419,6 +435,11 @@ public:
 
     void stop(PipelineExecutionContext& pec) override
     {
+        controller->drainStateInStop = &pec.getDrainState();
+        if (const auto configuration = pec.getDrainState().getConfiguration())
+        {
+            controller->drainIdInStop = configuration->drainId;
+        }
         auto stopCalls = stopCalled.fetch_add(1);
         auto repeatsDuringStop = controller->repeatCountDuringStop.load();
         if (stopCalls == repeatsDuringStop)
