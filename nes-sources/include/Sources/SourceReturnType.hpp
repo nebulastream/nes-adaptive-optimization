@@ -38,6 +38,12 @@ struct EoS
 {
 };
 
+/// Like EoS, but the stream ended because the query of the source is drained.
+struct Drained
+{
+    DrainId drainId;
+};
+
 enum class TryStopResult : uint8_t
 {
     SUCCESS,
@@ -51,7 +57,7 @@ enum class EmitResult : uint8_t
     STOP_REQUESTED,
 };
 
-using SourceReturnType = std::variant<Error, Data, EoS>;
+using SourceReturnType = std::variant<Error, Data, EoS, Drained>;
 using EmitFunction = std::function<EmitResult(OriginId, SourceReturnType, const std::stop_token&)>;
 
 }

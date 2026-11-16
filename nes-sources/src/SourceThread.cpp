@@ -133,6 +133,10 @@ SourceImplementationTermination dataSourceThreadRoutine(
 
         const auto fillTupleResult = source.fillTupleBuffer(*emptyBuffer, stopToken);
 
+        if (fillTupleResult.isMarker())
+        {
+            return {.result = SourceImplementationTermination::Drained, .drainId = fillTupleResult.getDrainId()};
+        }
         if (!fillTupleResult.isEoS())
         {
             /// The source read in raw bytes, thus we don't know the number of tuples yet.
@@ -153,6 +157,21 @@ SourceImplementationTermination dataSourceThreadRoutine(
     return {SourceImplementationTermination::StopRequested};
 }
 
+/// A drain overrides how the source implementation terminated, unless the query was stopped.
+SourceImplementationTermination
+applyDrainRequest(SourceImplementationTermination termination, const std::stop_token& stopToken, const SourceDrainRequest& drainRequest)
+{
+    if (stopToken.stop_requested() || termination.result == SourceImplementationTermination::Drained)
+    {
+        return termination;
+    }
+    if (const auto drainId = drainRequest.drainId.load(); drainId != INVALID_DRAIN_ID)
+    {
+        return {.result = SourceImplementationTermination::Drained, .drainId = drainId};
+    }
+    return termination;
+}
+
 void dataSourceThread(
     const std::stop_token& stopToken,
     BackpressureListener backpressureListener,
@@ -161,8 +180,16 @@ void dataSourceThread(
     SourceReturnType::EmitFunction emit,
     const OriginId originId,
     ///NOLINTNEXTLINE(performance-unnecessary-value-param) `jthread` does not allow references
-    std::shared_ptr<AbstractBufferProvider> bufferProvider)
+    std::shared_ptr<AbstractBufferProvider> bufferProvider,
+    ///NOLINTNEXTLINE(performance-unnecessary-value-param) `jthread` does not allow references
+    std::shared_ptr<SourceDrainRequest> drainRequest)
 {
+    /// The source implementation is interrupted by a stop of the query, or by a drain it cannot handle by itself.
+    /// Emitting data is only interrupted by a stop.
+    std::stop_source interrupt;
+    const std::stop_callback interruptOnStop(stopToken, [&interrupt] { interrupt.request_stop(); });
+    const std::stop_callback interruptOnDrain(drainRequest->interrupt.get_token(), [&interrupt] { interrupt.request_stop(); });
+
     size_t sequenceNumberGenerator = SequenceNumber::INITIAL;
     const EmitFn dataEmit = [&](TupleBuffer&& buffer, bool shouldAddMetadata)
     {
@@ -181,8 +208,12 @@ void dataSourceThread(
     cpptrace::try_catch(
         [&]()
         {
-            const auto termination = dataSourceThreadRoutine(stopToken, std::move(backpressureListener), *source, bufferProvider, dataEmit);
-            if (termination.result == SourceImplementationTermination::EndOfStream)
+            const auto termination = applyDrainRequest(
+                dataSourceThreadRoutine(interrupt.get_token(), std::move(backpressureListener), *source, bufferProvider, dataEmit),
+                stopToken,
+                *drainRequest);
+            if (termination.result == SourceImplementationTermination::EndOfStream
+                || termination.result == SourceImplementationTermination::Drained)
             {
                 /// A stop request must be able to interrupt every wait of the source thread, as the owner joins it after requesting stop.
                 /// A stopped query does not need the final watermark or the EoS.
@@ -195,7 +226,15 @@ void dataSourceThread(
                     if (emit(originId, SourceReturnType::Data{std::move(*watermarkBuffer)}, stopToken)
                         == SourceReturnType::EmitResult::SUCCESS)
                     {
-                        emit(originId, SourceReturnType::EoS{}, stopToken);
+                        if (termination.result == SourceImplementationTermination::Drained)
+                        {
+                            NES_DEBUG("Source {} was drained by drain {}", originId, termination.drainId);
+                            emit(originId, SourceReturnType::Drained{.drainId = termination.drainId}, stopToken);
+                        }
+                        else
+                        {
+                            emit(originId, SourceReturnType::EoS{}, stopToken);
+                        }
                     }
                 }
             }
@@ -236,7 +275,8 @@ bool SourceThread::start(SourceReturnType::EmitFunction&& emitFunction)
         sourceImplementation.get(),
         std::move(emitFunction),
         originId,
-        localBufferManager);
+        localBufferManager,
+        drainRequest);
     thread = std::move(sourceThread);
     return true;
 }
@@ -290,6 +330,23 @@ SourceReturnType::TryStopResult SourceThread::tryStop(std::chrono::milliseconds 
 
     NES_DEBUG("SourceThread {}: stopped", originId);
     return SourceReturnType::TryStopResult::SUCCESS;
+}
+
+bool SourceThread::drain(const DrainId drainId)
+{
+    PRECONDITION(drainId != INVALID_DRAIN_ID, "A drain requires a valid drain id");
+    auto expected = INVALID_DRAIN_ID;
+    if (!drainRequest->drainId.compare_exchange_strong(expected, drainId))
+    {
+        NES_WARNING("SourceThread {}: ignoring drain {}, the source is already drained by drain {}", originId, drainId, expected);
+        return false;
+    }
+    NES_DEBUG("SourceThread {}: drain {} requested", originId, drainId);
+    if (!sourceImplementation->drain())
+    {
+        drainRequest->interrupt.request_stop();
+    }
+    return true;
 }
 
 OriginId SourceThread::getOriginId() const

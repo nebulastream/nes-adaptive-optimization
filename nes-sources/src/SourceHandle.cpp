@@ -57,6 +57,11 @@ SourceReturnType::TryStopResult SourceHandle::tryStop(const std::chrono::millise
     return this->sourceThread->tryStop(timeout);
 }
 
+bool SourceHandle::drain(const DrainId drainId) const
+{
+    return this->sourceThread->drain(drainId);
+}
+
 OriginId SourceHandle::getSourceId() const
 {
     return this->sourceThread->getOriginId();

@@ -59,6 +59,10 @@ public:
     /// Tries to stop the source within a given timeout.
     [[nodiscard]] NES::SourceReturnType::TryStopResult tryStop(std::chrono::milliseconds timeout) const;
 
+    /// Ends the stream of the source because its query is drained: the source emits the data that belongs to the drained query,
+    /// the final watermark and `SourceReturnType::Drained`. Returns false if the source was already asked to drain.
+    bool drain(DrainId drainId) const;
+
     friend std::ostream& operator<<(std::ostream& out, const SourceHandle& sourceHandle);
 
     /// Todo #241: Rethink use of originId for sources, use new identifier for unique identification.
