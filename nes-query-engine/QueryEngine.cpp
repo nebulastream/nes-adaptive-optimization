@@ -27,6 +27,7 @@
 #include <stop_token>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -41,6 +42,7 @@
 #include <fmt/format.h>
 #include <folly/MPMCQueue.h>
 #include <DelayedTaskSubmitter.hpp>
+#include <DrainState.hpp>
 #include <EngineLogger.hpp>
 #include <ErrorHandling.hpp>
 #include <ExecutablePipelineStage.hpp>
@@ -183,6 +185,8 @@ public:
         QueryLifetimeController& controller,
         WorkEmitter& emitter);
     void stopQuery(QueryId queryId);
+
+    bool drainSources(QueryId queryId, DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker);
 
     void clear()
     {
@@ -828,6 +832,13 @@ void QueryEngine::stop(QueryId queryId)
 }
 
 /// NOLINTNEXTLINE Intentionally non-const
+bool QueryEngine::drainSources(const QueryId queryId, const DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker)
+{
+    ENGINE_LOG_INFO("Draining sources of Query {} for drain {}", queryId, drainId);
+    return queryCatalog->drainSources(queryId, drainId, sourcesEndingWithMarker);
+}
+
+/// NOLINTNEXTLINE Intentionally non-const
 void QueryEngine::start(std::unique_ptr<ExecutableQueryPlan> executableQueryPlan)
 {
     threadPool->taskQueue.addAdmissionTaskBlocking(
@@ -853,8 +864,11 @@ void QueryCatalog::start(
     struct RealQueryLifeTimeListener : QueryLifetimeListener
     {
         RealQueryLifeTimeListener(
-            QueryId queryId, std::shared_ptr<AbstractQueryStatusListener> listener, std::shared_ptr<QueryEngineStatisticListener> statistic)
-            : listener(std::move(listener)), statistic(std::move(statistic)), queryId(queryId)
+            QueryId queryId,
+            std::shared_ptr<AbstractQueryStatusListener> listener,
+            std::shared_ptr<QueryEngineStatisticListener> statistic,
+            std::shared_ptr<DrainState> drainState)
+            : listener(std::move(listener)), statistic(std::move(statistic)), queryId(queryId), drainState(std::move(drainState))
         {
         }
 
@@ -934,6 +948,8 @@ void QueryCatalog::start(
                 /// We want to avoid running destructors and callbacks while holding the atomic transition lock.
                 /// So we move the queryplan out of the lock and dispose (if there exists one)
                 std::optional<std::variant<std::unique_ptr<RunningQueryPlan>, std::unique_ptr<StoppingQueryPlan>>> toDispose{};
+                /// A query which was stopped is reported as stopped, even if a drain was configured.
+                bool wasStopped = false;
 
                 const auto didTransition = locked->transition(
                     [&toDispose](Starting&& starting)
@@ -946,9 +962,10 @@ void QueryCatalog::start(
                         toDispose = std::move(running.plan);
                         return Terminated{Terminated::TerminationReason::Stopped};
                     },
-                    [&toDispose](Stopping&& stopping)
+                    [&toDispose, &wasStopped](Stopping&& stopping)
                     {
                         toDispose = std::move(stopping.plan);
+                        wasStopped = true;
                         return Terminated{Terminated::TerminationReason::Stopped};
                     });
 
@@ -958,21 +975,38 @@ void QueryCatalog::start(
                     std::visit([]<typename T>(T&& plan) { T::element_type::dispose(std::forward<T>(plan)); }, std::move(toDispose).value());
                 }
 
-                if (didTransition)
+                if (!didTransition)
+                {
+                    return;
+                }
+                if (wasStopped || !drainState->getConfiguration().has_value())
                 {
                     listener->logQueryStatusChange(queryId, QueryStatus::Stopped, timestamp);
                     statistic->onEvent(QueryStop(ThreadPool::WorkerThread::id, queryId));
+                    return;
                 }
+                /// The query ended by itself while a drain was configured: it was drained iff all of its sources were drained.
+                if (auto incompleteDrain = drainState->findIncompleteDrain())
+                {
+                    auto exception = DrainIncomplete("{} in Query {}.", *incompleteDrain, queryId);
+                    ENGINE_LOG_ERROR("Query Failed: {}", exception.what());
+                    listener->logQueryFailure(queryId, std::move(exception), timestamp);
+                    statistic->onEvent(QueryFail(ThreadPool::WorkerThread::id, queryId));
+                    return;
+                }
+                listener->logQueryStatusChange(queryId, QueryStatus::Drained, timestamp);
+                statistic->onEvent(QueryStop(ThreadPool::WorkerThread::id, queryId));
             }
         }
 
         std::shared_ptr<AbstractQueryStatusListener> listener;
         std::shared_ptr<QueryEngineStatisticListener> statistic;
         QueryId queryId;
+        std::shared_ptr<DrainState> drainState;
         WeakStateRef state;
     };
 
-    auto queryListener = std::make_shared<RealQueryLifeTimeListener>(queryId, listener, statistic);
+    auto queryListener = std::make_shared<RealQueryLifeTimeListener>(queryId, listener, statistic, plan->drainState);
     const auto startTimestamp = std::chrono::system_clock::now();
     auto state = std::make_shared<StateRef>(Reserved{});
     this->queryStates.emplace(queryId, state);
@@ -994,6 +1028,24 @@ void QueryCatalog::start(
             "not transition into running until the callback is dropped.");
         RunningQueryPlan::dispose(std::move(runningQueryPlan));
     }
+}
+
+bool QueryCatalog::drainSources(const QueryId id, const DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker)
+{
+    const std::scoped_lock lock(mutex);
+    const auto it = queryStates.find(id);
+    if (it == queryStates.end())
+    {
+        ENGINE_LOG_WARNING("Attempting to drain query {} failed. Query was not submitted to the engine.", id);
+        return false;
+    }
+    bool draining = false;
+    if (!it->second->applyIfIs<Running>([&](Running& running) { draining = running.plan->drainSources(drainId, sourcesEndingWithMarker); }))
+    {
+        ENGINE_LOG_WARNING("Attempting to drain query {} failed. Query is not running.", id);
+        return false;
+    }
+    return draining;
 }
 
 void QueryCatalog::stopQuery(QueryId id)

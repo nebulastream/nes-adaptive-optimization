@@ -22,6 +22,7 @@
 #include <ranges>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <Identifiers/Identifiers.hpp>
@@ -263,7 +264,8 @@ std::pair<std::unique_ptr<RunningQueryPlan>, CallbackRef> RunningQueryPlan::star
                             },
                             [listener](const Exception& exception) { listener->onFailure(exception); },
                             controller,
-                            emitter));
+                            emitter,
+                            internal.qep->drainState));
                 }
                 /// release lock
             }
@@ -272,6 +274,32 @@ std::pair<std::unique_ptr<RunningQueryPlan>, CallbackRef> RunningQueryPlan::star
         });
 
     return {std::move(runningPlan), pipelineSetupCallbackRef};
+}
+
+bool RunningQueryPlan::drainSources(const DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker)
+{
+    const auto lock = internal.lock();
+    const auto configuration = lock->qep->drainState->getConfiguration();
+    if (!configuration.has_value() || configuration->drainId != drainId)
+    {
+        ENGINE_LOG_WARNING("Cannot drain sources: drain {} is not configured", drainId);
+        return false;
+    }
+    if (lock->sources.empty())
+    {
+        ENGINE_LOG_WARNING("Cannot drain sources: the sources have not been started");
+        return false;
+    }
+    for (const auto& [originId, source] : lock->sources)
+    {
+        if (sourcesEndingWithMarker.contains(originId))
+        {
+            ENGINE_LOG_DEBUG("Source {} ends with a drain marker", originId);
+            continue;
+        }
+        source->drain(drainId);
+    }
+    return true;
 }
 
 std::pair<std::unique_ptr<StoppingQueryPlan>, absl::AnyInvocable<void()>>

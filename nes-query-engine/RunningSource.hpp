@@ -19,6 +19,7 @@
 #include <vector>
 #include <Identifiers/Identifiers.hpp>
 #include <Sources/SourceHandle.hpp>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
 #include <Interfaces.hpp>
 
@@ -47,7 +48,8 @@ public:
         std::function<bool(std::vector<std::shared_ptr<RunningQueryPlanNode>>&&)> onSourceStopped,
         std::function<void(Exception)> onSourceFailure,
         QueryLifetimeController& controller,
-        WorkEmitter& emitter);
+        WorkEmitter& emitter,
+        std::shared_ptr<DrainState> drainState);
 
     RunningSource(const RunningSource& other) = delete;
     RunningSource& operator=(const RunningSource& other) = delete;
@@ -62,6 +64,9 @@ public:
 
     /// Calls the underlying `tryStop`
     [[nodiscard]] SourceReturnType::TryStopResult tryStop() const;
+
+    /// Calls the underlying `drain`
+    bool drain(DrainId drainId) const;
 
 private:
     RunningSource(

@@ -48,6 +48,7 @@ enum QueryState {
     Running = 2;
     Stopped = 3;
     Failed = 4;
+    Drained = 5;
 }
 
 message Error {

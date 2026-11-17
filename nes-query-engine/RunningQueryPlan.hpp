@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <Identifiers/Identifiers.hpp>
@@ -139,6 +140,11 @@ struct RunningQueryPlan final
     /// 1. Not notify any listeners. `onDestruction` will not be called.
     /// 2. Pipelines are not terminated, just destroyed.
     static std::unique_ptr<ExecutableQueryPlan> dispose(std::unique_ptr<RunningQueryPlan> runningQueryPlan);
+
+    /// Drains the sources of the query, except `sourcesEndingWithMarker`: network sources fed by a drained upstream query, which end with a
+    /// drain marker. The drain has to be configured in the query's drain state. Returns false if the drain is not configured or the sources
+    /// have not been started yet.
+    bool drainSources(DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker);
 
     /// Destroying a RunningQueryPlan will:
     /// 1. Will invoke listeners!

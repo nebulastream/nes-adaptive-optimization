@@ -18,7 +18,11 @@
 #include <ostream>
 #include <string>
 #include <utility>
+#include <Identifiers/Identifiers.hpp>
+#include <Identifiers/NESStrongTypeFormat.hpp>
+#include <fmt/format.h>
 #include <magic_enum/magic_enum.hpp>
+#include <ErrorHandling.hpp>
 
 namespace NES
 {
@@ -64,6 +68,29 @@ std::optional<RedirectTarget> DrainState::getRedirect(const std::string& channel
     if (const auto it = locked->redirects.find(channelId); it != locked->redirects.end())
     {
         return it->second;
+    }
+    return std::nullopt;
+}
+
+void DrainState::recordSourceEnd(const OriginId originId, std::optional<DrainId> drainId)
+{
+    internal.wlock()->sourceEnds.insert_or_assign(originId, drainId);
+}
+
+std::optional<std::string> DrainState::findIncompleteDrain() const
+{
+    const auto locked = internal.rlock();
+    PRECONDITION(locked->configuration.has_value(), "Checking a drain which has not been configured");
+    for (const auto& [originId, drainId] : locked->sourceEnds)
+    {
+        if (!drainId.has_value())
+        {
+            return fmt::format("source {} reached the end of its stream instead of being drained", originId);
+        }
+        if (*drainId != locked->configuration->drainId)
+        {
+            return fmt::format("source {} was drained by drain {} instead of drain {}", originId, *drainId, locked->configuration->drainId);
+        }
     }
     return std::nullopt;
 }

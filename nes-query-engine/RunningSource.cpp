@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <stop_token>
 #include <utility>
@@ -29,6 +30,7 @@
 #include <Identifiers/Identifiers.hpp>
 #include <Sources/SourceReturnType.hpp>
 #include <Util/Overloaded.hpp>
+#include <DrainState.hpp>
 #include <EngineLogger.hpp>
 #include <ErrorHandling.hpp>
 #include <Interfaces.hpp>
@@ -46,11 +48,18 @@ SourceReturnType::EmitFunction emitFunction(
     std::weak_ptr<RunningSource> source,
     std::vector<std::shared_ptr<RunningQueryPlanNode>> successors,
     QueryLifetimeController& controller,
-    WorkEmitter& emitter)
+    WorkEmitter& emitter,
+    std::shared_ptr<DrainState> drainState)
 {
     auto availableBuffer = std::make_shared<std::counting_semaphore<>>(
         std::min(numberOfInflightBuffers, static_cast<size_t>(std::numeric_limits<int32_t>::max())));
-    return [&controller, successors = std::move(successors), source, &emitter, queryId, availableBuffer = std::move(availableBuffer)](
+    return [&controller,
+            successors = std::move(successors),
+            source,
+            &emitter,
+            queryId,
+            availableBuffer = std::move(availableBuffer),
+            drainState = std::move(drainState)](
                const OriginId sourceId,
                SourceReturnType::SourceReturnType event,
                const std::stop_token& stopToken) -> SourceReturnType::EmitResult
@@ -90,13 +99,16 @@ SourceReturnType::EmitFunction emitFunction(
                 [&](SourceReturnType::EoS)
                 {
                     ENGINE_LOG_DEBUG("Source with OriginId {} reached end of stream for query {}", sourceId, queryId);
+                    drainState->recordSourceEnd(sourceId, std::nullopt);
                     controller.initializeSourceStop(queryId, sourceId, source);
                     return SourceReturnType::EmitResult::SUCCESS;
                 },
-                [&]([[maybe_unused]] const SourceReturnType::Drained& drained)
+                [&](const SourceReturnType::Drained& drained)
                 {
-                    /// A drained source ends its stream gracefully, like an end of stream.
+                    /// A drained source ends its stream gracefully, like an end of stream. Whether the query was drained is decided once all
+                    /// of its sources have ended.
                     ENGINE_LOG_DEBUG("Source with OriginId {} was drained by drain {} for query {}", sourceId, drained.drainId, queryId);
+                    drainState->recordSourceEnd(sourceId, drained.drainId);
                     controller.initializeSourceStop(queryId, sourceId, source);
                     return SourceReturnType::EmitResult::SUCCESS;
                 },
@@ -134,15 +146,18 @@ std::shared_ptr<RunningSource> RunningSource::create(
     std::function<bool(std::vector<std::shared_ptr<RunningQueryPlanNode>>&&)> onSourceStopped,
     std::function<void(Exception)> onSourceFailure,
     QueryLifetimeController& controller,
-    WorkEmitter& emitter)
+    WorkEmitter& emitter,
+    std::shared_ptr<DrainState> drainState)
 {
+    PRECONDITION(drainState != nullptr, "A source requires the drain state of its query");
     const auto maxInflightBuffers = source->getRuntimeConfiguration().inflightBufferLimit;
     auto runningSource = std::shared_ptr<RunningSource>(
         new RunningSource(successors, std::move(source), std::move(onSourceStopped), std::move(onSourceFailure)));
     ENGINE_LOG_DEBUG("Starting Running Source");
     {
         const std::scoped_lock lock(runningSource->mutex);
-        runningSource->source->start(emitFunction(queryId, maxInflightBuffers, runningSource, std::move(successors), controller, emitter));
+        runningSource->source->start(
+            emitFunction(queryId, maxInflightBuffers, runningSource, std::move(successors), controller, emitter, std::move(drainState)));
     }
     return runningSource;
 }
@@ -180,6 +195,12 @@ bool RunningSource::attemptUnregister()
         return true;
     }
     return false;
+}
+
+bool RunningSource::drain(const DrainId drainId) const
+{
+    const std::scoped_lock lock(mutex);
+    return this->source->drain(drainId);
 }
 
 SourceReturnType::TryStopResult RunningSource::tryStop() const

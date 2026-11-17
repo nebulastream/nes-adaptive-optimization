@@ -88,12 +88,13 @@ NES::DistributedQueryStatus NES::DistributedQueryStatusSnapshot::getGlobalQueryS
         return DistributedQueryStatus::Unreachable;
     }
 
-    if (all({QueryStatus::Stopped}))
+    /// A drained local query has stopped as well. The drain coordinator checks for drained queries itself.
+    if (all({QueryStatus::Stopped, QueryStatus::Drained}))
     {
         return DistributedQueryStatus::Stopped;
     }
 
-    if (any({QueryStatus::Stopped}))
+    if (any({QueryStatus::Stopped, QueryStatus::Drained}))
     {
         return DistributedQueryStatus::PartiallyStopped;
     }
@@ -103,7 +104,7 @@ NES::DistributedQueryStatus NES::DistributedQueryStatusSnapshot::getGlobalQueryS
         return DistributedQueryStatus::Registered;
     }
 
-    if (all({QueryStatus::Stopped, QueryStatus::Running, QueryStatus::Started, QueryStatus::Registered}))
+    if (all({QueryStatus::Stopped, QueryStatus::Drained, QueryStatus::Running, QueryStatus::Started, QueryStatus::Registered}))
     {
         return DistributedQueryStatus::Running;
     }

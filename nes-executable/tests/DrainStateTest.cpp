@@ -37,7 +37,6 @@ DrainConfiguration configuration(const uint64_t drainId)
     return DrainConfiguration{
         .drainId = DrainId(drainId),
         .stopLocalSources = false,
-        .expectedUpstreamMarkers = 2,
         .sinkModes = {{"forward", SinkDrainMode::ForwardMarker}, {"detach", SinkDrainMode::Detach}}};
 }
 
@@ -96,6 +95,32 @@ TEST_F(DrainStateTest, concurrentReadersSeeEitherNoneOrTheFullConfiguration)
             });
     }
     ASSERT_TRUE(state.configure(configuration(1)));
+}
+
+TEST_F(DrainStateTest, drainIsCompleteIfEverySourceWasDrainedByTheConfiguredDrain)
+{
+    DrainState state;
+    ASSERT_TRUE(state.configure(configuration(1)));
+    state.recordSourceEnd(OriginId(1), DrainId(1));
+    state.recordSourceEnd(OriginId(2), DrainId(1));
+    EXPECT_EQ(state.findIncompleteDrain(), std::nullopt);
+}
+
+TEST_F(DrainStateTest, drainIsIncompleteIfASourceReachedItsEndOfStream)
+{
+    DrainState state;
+    ASSERT_TRUE(state.configure(configuration(1)));
+    state.recordSourceEnd(OriginId(1), DrainId(1));
+    state.recordSourceEnd(OriginId(2), std::nullopt);
+    EXPECT_NE(state.findIncompleteDrain(), std::nullopt);
+}
+
+TEST_F(DrainStateTest, drainIsIncompleteIfASourceWasDrainedByAnotherDrain)
+{
+    DrainState state;
+    ASSERT_TRUE(state.configure(configuration(1)));
+    state.recordSourceEnd(OriginId(1), DrainId(2));
+    EXPECT_NE(state.findIncompleteDrain(), std::nullopt);
 }
 
 }

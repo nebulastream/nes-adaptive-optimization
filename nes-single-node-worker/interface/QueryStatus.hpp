@@ -32,6 +32,7 @@ enum class QueryStatus : uint8_t
     Running, /// Deployed->Running when calling start()
     Stopped, /// Running->Stopped when calling stop() and in Running state
     Failed,
+    Drained, /// Running->Drained when all sources of the query were drained by the configured drain
 };
 
 inline std::ostream& operator<<(std::ostream& ostream, const QueryStatus& status)

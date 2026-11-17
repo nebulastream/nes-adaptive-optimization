@@ -14,6 +14,7 @@
 
 #pragma once
 #include <memory>
+#include <unordered_set>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/AbstractQueryStatusListener.hpp>
 #include <Runtime/BufferManager.hpp>
@@ -39,6 +40,12 @@ public:
         const Host& host);
     void stop(QueryId queryId);
     void start(std::unique_ptr<ExecutableQueryPlan> executableQueryPlan);
+
+    /// Drains the sources of a running query, except `sourcesEndingWithMarker`: network sources fed by a drained upstream query, which end
+    /// with a drain marker. The drain has to be configured in the drain state of the query's ExecutableQueryPlan. Once all sources of the
+    /// query were drained, the query terminates with `QueryStatus::Drained`. Returns false if the query is not running or the drain is not
+    /// configured.
+    bool drainSources(QueryId queryId, DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker);
     ~QueryEngine();
 
     /// Order of Member construction is top to bottom and order of destruction is reversed

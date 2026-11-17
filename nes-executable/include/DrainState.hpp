@@ -44,8 +44,6 @@ struct DrainConfiguration
     DrainId drainId = INVALID_DRAIN_ID;
     /// The drain starts here: the query stops its sources which are not fed by a drained upstream query.
     bool stopLocalSources = false;
-    /// Number of network sources which have to deliver a drain marker before the query is drained.
-    uint32_t expectedUpstreamMarkers = 0;
     /// The drain mode of the network sinks, keyed by their channel id. Sinks without an entry close their channel as usual.
     std::unordered_map<std::string, SinkDrainMode> sinkModes;
 
@@ -81,11 +79,19 @@ public:
     /// Returns the receiver the network sink with the given channel id is redirected to, or nothing if no redirect has been set.
     [[nodiscard]] std::optional<RedirectTarget> getRedirect(const std::string& channelId) const;
 
+    /// Records how a source of the query ended its stream: drained by the given drain, or with a plain end of stream (nothing).
+    void recordSourceEnd(OriginId originId, std::optional<DrainId> drainId);
+
+    /// Returns why the drain is incomplete, or nothing if every source which ended was drained by the configured drain.
+    /// Must only be called once a drain has been configured.
+    [[nodiscard]] std::optional<std::string> findIncompleteDrain() const;
+
 private:
     struct Internal
     {
         std::optional<DrainConfiguration> configuration;
         std::unordered_map<std::string, RedirectTarget> redirects;
+        std::unordered_map<OriginId, std::optional<DrainId>> sourceEnds;
     };
 
     folly::Synchronized<Internal> internal;

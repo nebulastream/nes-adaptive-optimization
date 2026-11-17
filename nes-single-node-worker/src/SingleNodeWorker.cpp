@@ -187,17 +187,12 @@ WorkerStatus SingleNodeWorker::getWorkerStatus(std::chrono::system_clock::time_p
                 }
                 break;
             }
-            case QueryStatus::Stopped: {
-                /// A query stopped during setup may never have reported Running.
-                INVARIANT(metrics.stop.has_value(), "If query is stopped, it should have a stopped timestamp");
-                if (metrics.stop.value() >= after)
-                {
-                    status.terminatedQueries.emplace_back(queryId, metrics.running, metrics.stop.value(), metrics.error);
-                }
-                break;
-            }
+            case QueryStatus::Stopped:
+            case QueryStatus::Drained:
             case QueryStatus::Failed: {
-                INVARIANT(metrics.stop.has_value(), "If query has failed, it should have a stopped timestamp");
+                /// A query which terminated during setup may never have reported Running. The worker status does not distinguish how a
+                /// query terminated, except that a failed query carries its error.
+                INVARIANT(metrics.stop.has_value(), "If query has terminated, it should have a stopped timestamp");
                 if (metrics.stop.value() >= after)
                 {
                     status.terminatedQueries.emplace_back(queryId, metrics.running, metrics.stop.value(), metrics.error);

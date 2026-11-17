@@ -350,6 +350,19 @@ void TestingHarness::expectQueryStatusEvents(const QueryId& id, std::initializer
                                 return true;
                             }));
                 break;
+            case QueryStatus::Drained:
+                ASSERT_TRUE(queryTermination.try_emplace(id, std::make_unique<std::promise<void>>()).second)
+                    << "Registered multiple query terminations";
+                EXPECT_CALL(*status, logQueryStatusChange(id, QueryStatus::Drained, ::testing::_))
+                    .Times(1)
+                    .WillOnce(
+                        ::testing::Invoke(
+                            [this](const auto& id, auto, auto)
+                            {
+                                queryTermination.at(id)->set_value();
+                                return true;
+                            }));
+                break;
             case QueryStatus::Failed:
                 ASSERT_TRUE(queryTermination.try_emplace(id, std::make_unique<std::promise<void>>()).second)
                     << "Registered multiple query terminations";

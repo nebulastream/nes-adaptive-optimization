@@ -105,8 +105,8 @@ protected:
         }
     }
 
-    std::shared_ptr<BufferManager> bufferManager = BufferManager::create(
-        64 * 1024 * 1024, 0.5, BufferAlignment{64}, 8192, std::make_shared<NesDefaultMemoryAllocator>());
+    std::shared_ptr<BufferManager> bufferManager
+        = BufferManager::create(64 * 1024 * 1024, 0.5, BufferAlignment{64}, 8192, std::make_shared<NesDefaultMemoryAllocator>());
 };
 
 /// The sequence numbers of the buffers the source delivers until its stream ends, and how it ended.
