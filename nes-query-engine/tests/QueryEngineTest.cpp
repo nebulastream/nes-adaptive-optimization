@@ -248,7 +248,7 @@ TEST_F(QueryEngineTest, singleQueryWithExternalStop)
 
 DrainConfiguration drainConfiguration(const DrainId drainId)
 {
-    return DrainConfiguration{.drainId = drainId, .stopLocalSources = true, .sinkModes = {}};
+    return DrainConfiguration{.drainId = drainId, .drainsQuery = true, .stopLocalSources = true, .sinkModes = {}};
 }
 
 /// Draining the sources of a query terminates it with QueryStatus::Drained. All pipelines of the query share the drain state of its
@@ -337,6 +337,36 @@ TEST_F(QueryEngineTest, queryWithConfiguredDrainFailsIfASourceReachesItsEndOfStr
     test.stop();
 }
 
+/// A query which only takes part in a drain through its sinks is not drained itself, so its end of stream stops it as usual.
+TEST_F(QueryEngineTest, queryOnlyTakingPartInADrainIsStoppedByItsEndOfStream)
+{
+    TestingHarness test;
+    auto builder = test.buildNewQuery();
+    auto source = builder.addSource();
+    auto sink = builder.addSink({source});
+    auto query = test.addNewQuery(std::move(builder));
+    ASSERT_TRUE(query->drainState->configure(
+        DrainConfiguration{.drainId = DrainId(7), .drainsQuery = false, .stopLocalSources = false, .sinkModes = {}}));
+
+    auto ctrl = test.sourceControls[source];
+    auto sinkCtrl = test.sinkControls[sink];
+
+    test.expectQueryStatusEvents(test.queryId(0), {QueryStatus::Started, QueryStatus::Running, QueryStatus::Stopped});
+    test.expectSourceTermination(test.queryId(0), source, QueryTerminationType::Graceful);
+
+    test.start();
+    {
+        test.startQuery(std::move(query));
+        ASSERT_TRUE(test.waitForQepRunning(test.queryId(0), DEFAULT_LONG_AWAIT_TIMEOUT));
+        ASSERT_TRUE(ctrl->waitUntilOpened());
+        EXPECT_FALSE(test.qm->drainSources(test.queryId(0), DrainId(7), {}));
+        ctrl->injectEoS();
+    }
+    ASSERT_TRUE(sinkCtrl->waitForStop());
+    ASSERT_TRUE(test.waitForQepTermination(test.queryId(0), DEFAULT_LONG_AWAIT_TIMEOUT));
+    test.stop();
+}
+
 /// A query which is stopped is reported as stopped, even if a drain is configured.
 TEST_F(QueryEngineTest, stoppedQueryWithConfiguredDrainReportsStopped)
 {
@@ -346,6 +376,7 @@ TEST_F(QueryEngineTest, stoppedQueryWithConfiguredDrainReportsStopped)
     auto sink = builder.addSink({source});
     auto query = test.addNewQuery(std::move(builder));
     ASSERT_TRUE(query->drainState->configure(drainConfiguration(DrainId(7))));
+    const auto drainState = query->drainState;
 
     auto ctrl = test.sourceControls[source];
 
@@ -360,6 +391,8 @@ TEST_F(QueryEngineTest, stoppedQueryWithConfiguredDrainReportsStopped)
     }
     ASSERT_TRUE(ctrl->waitUntilDestroyed());
     ASSERT_TRUE(test.waitForQepTermination(test.queryId(0), DEFAULT_LONG_AWAIT_TIMEOUT));
+    /// The sinks of a stopped query must not end their channels in their drain mode.
+    EXPECT_FALSE(drainState->isDrained());
     test.stop();
 }
 

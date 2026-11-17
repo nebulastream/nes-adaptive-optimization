@@ -280,9 +280,9 @@ bool RunningQueryPlan::drainSources(const DrainId drainId, const std::unordered_
 {
     const auto lock = internal.lock();
     const auto configuration = lock->qep->drainState->getConfiguration();
-    if (!configuration.has_value() || configuration->drainId != drainId)
+    if (!configuration.has_value() || configuration->drainId != drainId || !configuration->drainsQuery)
     {
-        ENGINE_LOG_WARNING("Cannot drain sources: drain {} is not configured", drainId);
+        ENGINE_LOG_WARNING("Cannot drain sources: drain {} is not configured to drain the query", drainId);
         return false;
     }
     if (lock->sources.empty())
@@ -310,6 +310,8 @@ RunningQueryPlan::stop(std::unique_ptr<RunningQueryPlan> runningQueryPlan)
     auto lock = runningQueryPlan->internal.lock();
     auto& internal = *lock;
     internal.stopping = true;
+    /// Mark the stop before the pipelines are released, so the sinks they stop do not mistake the stop for a drain.
+    internal.qep->drainState->markStopped();
 
     return {
         std::make_unique<StoppingQueryPlan>(

@@ -81,15 +81,33 @@ std::optional<std::string> DrainState::findIncompleteDrain() const
 {
     const auto locked = internal.rlock();
     PRECONDITION(locked->configuration.has_value(), "Checking a drain which has not been configured");
-    for (const auto& [originId, drainId] : locked->sourceEnds)
+    return findIncompleteDrain(*locked);
+}
+
+void DrainState::markStopped()
+{
+    internal.wlock()->stopped = true;
+}
+
+bool DrainState::isDrained() const
+{
+    const auto locked = internal.rlock();
+    return locked->configuration.has_value() && locked->configuration->drainsQuery && !locked->stopped && !locked->sourceEnds.empty()
+        && !findIncompleteDrain(*locked).has_value();
+}
+
+std::optional<std::string> DrainState::findIncompleteDrain(const Internal& internal)
+{
+    for (const auto& [originId, drainId] : internal.sourceEnds)
     {
         if (!drainId.has_value())
         {
             return fmt::format("source {} reached the end of its stream instead of being drained", originId);
         }
-        if (*drainId != locked->configuration->drainId)
+        if (*drainId != internal.configuration->drainId)
         {
-            return fmt::format("source {} was drained by drain {} instead of drain {}", originId, *drainId, locked->configuration->drainId);
+            return fmt::format(
+                "source {} was drained by drain {} instead of drain {}", originId, *drainId, internal.configuration->drainId);
         }
     }
     return std::nullopt;

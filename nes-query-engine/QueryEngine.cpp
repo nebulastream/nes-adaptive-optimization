@@ -979,7 +979,8 @@ void QueryCatalog::start(
                 {
                     return;
                 }
-                if (wasStopped || !drainState->getConfiguration().has_value())
+                if (const auto configuration = drainState->getConfiguration();
+                    wasStopped || !configuration.has_value() || !configuration->drainsQuery)
                 {
                     listener->logQueryStatusChange(queryId, QueryStatus::Stopped, timestamp);
                     statistic->onEvent(QueryStop(ThreadPool::WorkerThread::id, queryId));

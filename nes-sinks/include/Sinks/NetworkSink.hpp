@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <expected>
+#include <mutex>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -85,6 +86,9 @@ protected:
     std::ostream& toString(std::ostream& str) const override;
 
 private:
+    /// Redirects the channel once its receiver has detached and the worker has set a redirect target for it.
+    void redirectIfRequested(PipelineExecutionContext& pec);
+
     size_t tupleSize;
     folly::Synchronized<std::vector<TupleBuffer>> bufferBacklog;
     BackpressureHandler backpressureHandler;
@@ -96,6 +100,10 @@ private:
     size_t senderQueueSize;
     size_t maxPendingAcks;
     std::atomic_bool closed;
+    /// The receiver has detached and the sink buffers its data (`SinkDrainMode::BufferOnDetach`) until it is redirected.
+    std::atomic_bool detached;
+    std::mutex redirectMutex;
+    bool redirected = false;
 };
 
 }

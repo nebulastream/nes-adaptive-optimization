@@ -36,6 +36,7 @@ DrainConfiguration configuration(const uint64_t drainId)
 {
     return DrainConfiguration{
         .drainId = DrainId(drainId),
+        .drainsQuery = true,
         .stopLocalSources = false,
         .sinkModes = {{"forward", SinkDrainMode::ForwardMarker}, {"detach", SinkDrainMode::Detach}}};
 }
@@ -121,6 +122,36 @@ TEST_F(DrainStateTest, drainIsIncompleteIfASourceWasDrainedByAnotherDrain)
     ASSERT_TRUE(state.configure(configuration(1)));
     state.recordSourceEnd(OriginId(1), DrainId(2));
     EXPECT_NE(state.findIncompleteDrain(), std::nullopt);
+}
+
+TEST_F(DrainStateTest, isDrainedOnceEveryEndedSourceWasDrainedByTheConfiguredDrain)
+{
+    DrainState state;
+    ASSERT_TRUE(state.configure(configuration(1)));
+    EXPECT_FALSE(state.isDrained()) << "No source has ended yet";
+    state.recordSourceEnd(OriginId(1), DrainId(1));
+    EXPECT_TRUE(state.isDrained());
+    state.recordSourceEnd(OriginId(2), std::nullopt);
+    EXPECT_FALSE(state.isDrained());
+}
+
+TEST_F(DrainStateTest, stoppedQueryIsNotDrained)
+{
+    DrainState state;
+    ASSERT_TRUE(state.configure(configuration(1)));
+    state.recordSourceEnd(OriginId(1), DrainId(1));
+    state.markStopped();
+    EXPECT_FALSE(state.isDrained());
+}
+
+TEST_F(DrainStateTest, queryWhichDoesNotDrainItselfIsNeverDrained)
+{
+    DrainState state;
+    auto onlySinks = configuration(1);
+    onlySinks.drainsQuery = false;
+    ASSERT_TRUE(state.configure(onlySinks));
+    state.recordSourceEnd(OriginId(1), DrainId(1));
+    EXPECT_FALSE(state.isDrained());
 }
 
 }

@@ -42,6 +42,9 @@ enum class SinkDrainMode : uint8_t
 struct DrainConfiguration
 {
     DrainId drainId = INVALID_DRAIN_ID;
+    /// The query itself is drained. If false, the query only takes part in the drain through the modes of its sinks, e.g. it buffers
+    /// until it is redirected, and keeps running.
+    bool drainsQuery = false;
     /// The drain starts here: the query stops its sources which are not fed by a drained upstream query.
     bool stopLocalSources = false;
     /// The drain mode of the network sinks, keyed by their channel id. Sinks without an entry close their channel as usual.
@@ -86,13 +89,24 @@ public:
     /// Must only be called once a drain has been configured.
     [[nodiscard]] std::optional<std::string> findIncompleteDrain() const;
 
+    /// Records that the query is being stopped. A stopped query is not drained, even if some of its sources were drained before.
+    void markStopped();
+
+    /// Returns true if the query drains itself and has been drained so far: it is not being stopped, at least one source has ended,
+    /// and every source which ended was drained by the configured drain. A network sink checks this before it ends its channel in
+    /// its drain mode, as all sources upstream of it have ended by then.
+    [[nodiscard]] bool isDrained() const;
+
 private:
     struct Internal
     {
         std::optional<DrainConfiguration> configuration;
         std::unordered_map<std::string, RedirectTarget> redirects;
         std::unordered_map<OriginId, std::optional<DrainId>> sourceEnds;
+        bool stopped = false;
     };
+
+    [[nodiscard]] static std::optional<std::string> findIncompleteDrain(const Internal& internal);
 
     folly::Synchronized<Internal> internal;
 };

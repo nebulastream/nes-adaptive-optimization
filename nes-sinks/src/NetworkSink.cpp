@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -45,6 +46,7 @@
 #include <Schema/Schema.hpp>
 #include <Schema/SchemaFwd.hpp>
 #include <BackpressureChannel.hpp>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
 #include <PipelineExecutionContext.hpp>
 
@@ -142,6 +144,7 @@ void NetworkSink::stop(PipelineExecutionContext& pec)
     if (!closed)
     {
         INVARIANT(backpressureHandler.empty(), "BackpressureHandler is not empty");
+        redirectIfRequested(pec);
 
         switch (flush_sender_channel(*this->channel.value()))
         {
@@ -166,9 +169,57 @@ void NetworkSink::stop(PipelineExecutionContext& pec)
         }
     }
 
+    /// All sources upstream of the sink have ended. The sink ends its channel in its drain mode only if they were drained, and not if the
+    /// query is stopped or reached its end of stream.
+    const auto& drainState = pec.getDrainState();
+    const auto mode = drainState.getSinkMode(channelId);
+    if (mode == SinkDrainMode::ForwardMarker && drainState.isDrained())
+    {
+        const auto drainId = drainState.getConfiguration()->drainId;
+        NES_DEBUG("Closing Sender channel {} with a marker of drain {}", channelId, drainId);
+        close_sender_channel_with_marker(*std::move(this->channel), drainId.getRawValue());
+        return;
+    }
+    if (mode == SinkDrainMode::Detach && drainState.isDrained())
+    {
+        NES_DEBUG("Detaching Sender channel {}", channelId);
+        detach_sender_channel(*std::move(this->channel));
+        return;
+    }
+
     NES_DEBUG("Closing Sender channel {}", channelId);
     close_sender_channel(*std::move(this->channel));
     NES_DEBUG("Sender channel {} closed", channelId);
+}
+
+void NetworkSink::redirectIfRequested(PipelineExecutionContext& pec)
+{
+    if (!detached)
+    {
+        return;
+    }
+    const std::scoped_lock lock(redirectMutex);
+    if (redirected)
+    {
+        return;
+    }
+    const auto target = pec.getDrainState().getRedirect(channelId);
+    if (!target)
+    {
+        return;
+    }
+    try
+    {
+        redirect_sender_channel(*channel.value(), rust::String(target->connection), rust::String(target->channel));
+    }
+    catch (const rust::Error& error)
+    {
+        this->closed = true;
+        throw CannotWriteToSink("NetworkSink channel {} could not be redirected to {}: {}", channelId, *target, error.what());
+    }
+    NES_INFO("Redirected Sender channel {} to {}", channelId, *target);
+    redirected = true;
+    detached = false;
 }
 
 void NetworkSink::execute(const TupleBuffer& inputBuffer, PipelineExecutionContext& pec)
@@ -181,6 +232,7 @@ void NetworkSink::execute(const TupleBuffer& inputBuffer, PipelineExecutionConte
         NES_WARNING("Sink is closed dropping buffer: {}-{}", inputBuffer.getSequenceNumber(), inputBuffer.getChunkNumber());
         return;
     }
+    redirectIfRequested(pec);
 
     auto currentBuffer = std::optional(inputBuffer);
     while (currentBuffer)
@@ -212,6 +264,20 @@ void NetworkSink::execute(const TupleBuffer& inputBuffer, PipelineExecutionConte
         /// Set data and send over the network
         const auto sendResult = send_buffer(
             *channel.value(), metadata, rust::Slice(usedBufferMemory), rust::Slice<const rust::Slice<const uint8_t>>(children));
+        if (sendResult == SendResult::Detached && pec.getDrainState().getSinkMode(channelId) == SinkDrainMode::BufferOnDetach)
+        {
+            /// The receiver was drained and the sink keeps its data until it is redirected. The retry loop of the backpressure handler
+            /// checks for the redirect.
+            if (!detached.exchange(true))
+            {
+                NES_INFO("Receiver of Sender channel {} detached, buffering until it is redirected", channelId);
+            }
+            if (const auto emit = backpressureHandler.onFull(*currentBuffer, backpressureController))
+            {
+                pec.repeatTask(*emit, BACKPRESSURE_RETRY_INTERVAL);
+            }
+            return;
+        }
         switch (sendResult)
         {
             case SendResult::Closed:
