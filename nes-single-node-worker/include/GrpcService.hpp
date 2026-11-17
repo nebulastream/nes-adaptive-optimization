@@ -33,6 +33,12 @@ public:
 
     grpc::Status StopQuery(grpc::ServerContext*, const StopQueryRequest*, google::protobuf::Empty*) override;
 
+    grpc::Status DrainQuery(grpc::ServerContext*, const DrainQueryRequest*, google::protobuf::Empty*) override;
+
+    grpc::Status StartDrain(grpc::ServerContext*, const StartDrainRequest*, google::protobuf::Empty*) override;
+
+    grpc::Status RedirectSink(grpc::ServerContext*, const RedirectSinkRequest*, google::protobuf::Empty*) override;
+
     grpc::Status RequestQueryStatus(grpc::ServerContext*, const QueryStatusRequest*, QueryStatusReply*) override;
 
     grpc::Status RequestStatus(grpc::ServerContext* context, const WorkerStatusRequest* request, WorkerStatusResponse* response) override;

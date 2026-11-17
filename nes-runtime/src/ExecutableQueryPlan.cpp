@@ -62,8 +62,8 @@ std::ostream& operator<<(std::ostream& os, const ExecutableQueryPlan& instantiat
     return os;
 }
 
-std::unique_ptr<ExecutableQueryPlan>
-ExecutableQueryPlan::instantiate(CompiledQueryPlan& compiledQueryPlan, const SourceProvider& sourceProvider)
+std::unique_ptr<ExecutableQueryPlan> ExecutableQueryPlan::instantiate(
+    CompiledQueryPlan& compiledQueryPlan, const SourceProvider& sourceProvider, std::shared_ptr<DrainState> drainState)
 {
     std::vector<SourceWithSuccessor> instantiatedSources;
 
@@ -98,12 +98,17 @@ ExecutableQueryPlan::instantiate(CompiledQueryPlan& compiledQueryPlan, const Sou
     }
 
 
-    return std::make_unique<ExecutableQueryPlan>(compiledQueryPlan.queryId, compiledQueryPlan.pipelines, std::move(instantiatedSources));
+    return std::make_unique<ExecutableQueryPlan>(
+        compiledQueryPlan.queryId, compiledQueryPlan.pipelines, std::move(instantiatedSources), std::move(drainState));
 }
 
 ExecutableQueryPlan::ExecutableQueryPlan(
-    QueryId queryId, std::vector<std::shared_ptr<ExecutablePipeline>> pipelines, std::vector<SourceWithSuccessor> instantiatedSources)
-    : queryId(queryId), pipelines(std::move(pipelines)), sources(std::move(instantiatedSources))
+    QueryId queryId,
+    std::vector<std::shared_ptr<ExecutablePipeline>> pipelines,
+    std::vector<SourceWithSuccessor> instantiatedSources,
+    std::shared_ptr<DrainState> drainState)
+    : queryId(queryId), pipelines(std::move(pipelines)), sources(std::move(instantiatedSources)), drainState(std::move(drainState))
 {
+    PRECONDITION(this->drainState != nullptr, "A query requires a drain state");
 }
 }

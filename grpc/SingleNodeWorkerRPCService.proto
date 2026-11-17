@@ -21,6 +21,14 @@ service WorkerRPCService {
   rpc StartQuery (StartQueryRequest) returns (StartQueryReply) {}
   rpc StopQuery (StopQueryRequest) returns (google.protobuf.Empty) {}
 
+  /// Configures the drain of a query (phase 1). The query keeps running until the drain is started.
+  rpc DrainQuery (DrainQueryRequest) returns (google.protobuf.Empty) {}
+  /// Starts a configured drain at a query (phase 2). Returns once the sources have been told to drain; the query reports Drained once
+  /// the drain has completed.
+  rpc StartDrain (StartDrainRequest) returns (google.protobuf.Empty) {}
+  /// Redirects a network sink, which buffers since its receiver was drained, to a new receiver.
+  rpc RedirectSink (RedirectSinkRequest) returns (google.protobuf.Empty) {}
+
   rpc RequestQueryStatus (QueryStatusRequest) returns (QueryStatusReply) {}
   rpc RequestStatus (WorkerStatusRequest) returns (WorkerStatusResponse) {}
   rpc RequestVersion (google.protobuf.Empty) returns (VersionResponse) {}
@@ -40,6 +48,44 @@ message StartQueryReply {
 
 message StopQueryRequest {
     NES.SerializableQueryId queryId = 1;
+}
+
+/// How a network sink ends its channel when its query is drained.
+enum SinkDrainMode {
+    /// The downstream query is drained as well: send a drain marker, then close the channel.
+    SinkForwardMarker = 0;
+    /// The downstream query keeps running: leave the channel without ending the stream.
+    SinkDetach = 1;
+    /// The query is not drained, but the downstream query is: buffer once the receiver detaches, until the sink is redirected.
+    SinkBufferOnDetach = 2;
+}
+
+message DrainQueryRequest {
+    NES.SerializableQueryId queryId = 1;
+    uint64 drainId = 2;
+    /// The query itself is drained. If false, it only takes part in the drain through sinks in BufferOnDetach mode.
+    bool drainsQuery = 3;
+    /// The drain starts at this query: StartDrain drains every source which is not listed in markerChannels.
+    bool stopLocalSources = 4;
+    /// The channel ids of the network sources which end with a marker from a drained upstream query.
+    repeated string markerChannels = 5;
+    /// The drain mode of network sinks, keyed by their channel id. Sinks without an entry close their channel as usual.
+    map<string, SinkDrainMode> sinkModes = 6;
+}
+
+message StartDrainRequest {
+    NES.SerializableQueryId queryId = 1;
+    uint64 drainId = 2;
+}
+
+message RedirectSinkRequest {
+    NES.SerializableQueryId queryId = 1;
+    /// The channel id of the network sink.
+    string channel = 2;
+    /// The data address (host:port) of the new receiver.
+    string connection = 3;
+    /// The channel id of the network source the sink is redirected to.
+    string newChannel = 4;
 }
 
 enum QueryState {

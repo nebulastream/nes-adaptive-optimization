@@ -18,6 +18,7 @@
 #include <expected>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
@@ -28,6 +29,7 @@
 #include <CompositeStatisticListener.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryCompiler.hpp>
+#include <QueryDrainTracker.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
 #include <SingleNodeWorkerConfiguration.hpp>
@@ -48,6 +50,7 @@ class SingleNodeWorker
     SharedPtr<CompositeStatisticListener> listener;
     SharedPtr<NodeEngine> nodeEngine;
     UniquePtr<QueryCompilation::QueryCompiler> compiler;
+    UniquePtr<QueryDrainTracker> drainTracker;
     SingleNodeWorkerConfiguration configuration;
 
 public:
@@ -70,6 +73,16 @@ public:
     /// Stops the Query and moves it into the StoppedState.
     /// @param queryId identifies the registered query
     std::expected<void, Exception> stopQuery(QueryId queryId) noexcept;
+
+    /// Configures the drain of the query (phase 1 of a drain). The query keeps running until the drain is started.
+    std::expected<void, Exception> drainQuery(const QueryId& queryId, const DrainRequest& request) noexcept;
+
+    /// Starts the configured drain at the query: drains every source which does not end with a marker from a drained upstream query.
+    /// Returns once the sources have been told to drain. The query reports `Drained` once the drain has completed.
+    std::expected<void, Exception> startDrain(const QueryId& queryId, DrainId drainId) noexcept;
+
+    /// Redirects a network sink, which buffers since its receiver was drained, to a new receiver.
+    std::expected<void, Exception> redirectSink(const QueryId& queryId, const std::string& channel, RedirectTarget target) noexcept;
 
     /// Summary structure for query.
     [[nodiscard]] std::expected<LocalQueryStatusSnapshot, Exception> getQueryStatus(QueryId queryId) const noexcept;

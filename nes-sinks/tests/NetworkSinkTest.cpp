@@ -173,7 +173,8 @@ protected:
         backpressureListener.emplace(std::move(listener));
         return std::make_unique<NetworkSink>(
             std::move(controller),
-            NetworkSinkConfig{.dataEndpoint = receiverAddress, .bind = senderAddress, .channel = channel, .senderQueueSize = 0, .maxPendingAcks = 0},
+            NetworkSinkConfig{
+                .dataEndpoint = receiverAddress, .bind = senderAddress, .channel = channel, .senderQueueSize = 0, .maxPendingAcks = 0},
             descriptor.value());
     }
 
@@ -330,7 +331,11 @@ TEST_F(NetworkSinkTest, BuffersWhileDetachedAndDeliversEverythingAfterTheRedirec
     oldSource.open(bufferManager);
     DrainState drainState;
     ASSERT_TRUE(drainState.configure(
-        DrainConfiguration{.drainId = DrainId(5), .drainsQuery = false, .stopLocalSources = false, .sinkModes = {{"old", SinkDrainMode::BufferOnDetach}}}));
+        DrainConfiguration{
+            .drainId = DrainId(5),
+            .drainsQuery = false,
+            .stopLocalSources = false,
+            .sinkModes = {{"old", SinkDrainMode::BufferOnDetach}}}));
     TestPipelineExecutionContext pec(drainState, bufferManager);
 
     auto sink = createSink("old");

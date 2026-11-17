@@ -49,6 +49,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <CompiledQueryPlan.hpp>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
 #include <ExecutablePipelineStage.hpp>
 #include <ExecutableQueryPlan.hpp>
@@ -258,7 +259,7 @@ QueryPlanBuilder::TestPlanCtrl QueryPlanBuilder::build(QueryId queryId, std::sha
     }
 
     return {
-        .query = std::make_unique<ExecutableQueryPlan>(queryId, std::move(pipelines), std::move(sources)),
+        .query = std::make_unique<ExecutableQueryPlan>(queryId, std::move(pipelines), std::move(sources), std::make_shared<DrainState>()),
         .sourceIds = sourceIds,
         .pipelineIds = pipelineIds,
         .sourceCtrls = sourceCtrls,

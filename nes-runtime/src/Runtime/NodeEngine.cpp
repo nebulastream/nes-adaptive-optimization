@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <memory>
+#include <unordered_set>
 #include <utility>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
@@ -24,6 +25,7 @@
 
 #include <Util/Logger/Logger.hpp>
 #include <CompiledQueryPlan.hpp>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
 #include <ExecutableQueryPlan.hpp>
 #include <QueryEngine.hpp>
@@ -57,12 +59,18 @@ NodeEngine::NodeEngine(
 {
 }
 
-void NodeEngine::startQuery(QueryId queryId, std::unique_ptr<CompiledQueryPlan> compiledQueryPlan)
+void NodeEngine::startQuery(QueryId queryId, std::unique_ptr<CompiledQueryPlan> compiledQueryPlan, std::shared_ptr<DrainState> drainState)
 {
     PRECONDITION(queryId != INVALID_QUERY_ID, "QueryId must be not invalid!");
     queryLog->logQueryStatusChange(queryId, QueryStatus::Registered, std::chrono::system_clock::now());
     systemEventListener->onEvent(StartQuerySystemEvent(std::move(queryId)));
-    queryEngine->start(ExecutableQueryPlan::instantiate(*compiledQueryPlan, *sourceProvider));
+    queryEngine->start(ExecutableQueryPlan::instantiate(*compiledQueryPlan, *sourceProvider, std::move(drainState)));
+}
+
+bool NodeEngine::drainSources(const QueryId& queryId, const DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker)
+{
+    PRECONDITION(queryId != INVALID_QUERY_ID, "QueryId must be not invalid!");
+    return queryEngine->drainSources(queryId, drainId, sourcesEndingWithMarker);
 }
 
 void NodeEngine::stopQuery(QueryId queryId)

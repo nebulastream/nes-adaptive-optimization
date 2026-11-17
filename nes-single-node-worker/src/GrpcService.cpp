@@ -28,7 +28,9 @@
 #include <google/protobuf/empty.pb.h>
 #include <grpcpp/server_context.h>
 #include <grpcpp/support/status.h>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
+#include <QueryDrainTracker.hpp>
 #include <SingleNodeWorkerRPCService.pb.h>
 #include <Version.hpp>
 #include <WorkerStatus.hpp>
@@ -147,6 +149,66 @@ grpc::Status GRPCServer::StopQuery(grpc::ServerContext* context, const StopQuery
         {
             const auto queryId = QueryPlanSerializationUtil::deserializeQueryId(request->queryid());
             getValueOrThrow(delegate.stopQuery(queryId));
+            return grpc::Status::OK;
+        },
+        context);
+}
+
+grpc::Status GRPCServer::DrainQuery(grpc::ServerContext* context, const DrainQueryRequest* request, google::protobuf::Empty*)
+{
+    return tryWithDefaultHandling(
+        [&]
+        {
+            const auto queryId = QueryPlanSerializationUtil::deserializeQueryId(request->queryid());
+            DrainRequest drainRequest{
+                .drainId = DrainId(request->drainid()),
+                .drainsQuery = request->drainsquery(),
+                .stopLocalSources = request->stoplocalsources(),
+                .markerChannels = {request->markerchannels().begin(), request->markerchannels().end()},
+                .sinkModes = {}};
+            for (const auto& [channel, mode] : request->sinkmodes())
+            {
+                switch (static_cast<::SinkDrainMode>(mode))
+                {
+                    case ::SinkForwardMarker:
+                        drainRequest.sinkModes.emplace(channel, NES::SinkDrainMode::ForwardMarker);
+                        break;
+                    case ::SinkDetach:
+                        drainRequest.sinkModes.emplace(channel, NES::SinkDrainMode::Detach);
+                        break;
+                    case ::SinkBufferOnDetach:
+                        drainRequest.sinkModes.emplace(channel, NES::SinkDrainMode::BufferOnDetach);
+                        break;
+                    default:
+                        throw InvalidDrainRequest("unknown drain mode {} of the network sink {}", static_cast<int>(mode), channel);
+                }
+            }
+            getValueOrThrow(delegate.drainQuery(queryId, drainRequest));
+            return grpc::Status::OK;
+        },
+        context);
+}
+
+grpc::Status GRPCServer::StartDrain(grpc::ServerContext* context, const StartDrainRequest* request, google::protobuf::Empty*)
+{
+    return tryWithDefaultHandling(
+        [&]
+        {
+            const auto queryId = QueryPlanSerializationUtil::deserializeQueryId(request->queryid());
+            getValueOrThrow(delegate.startDrain(queryId, DrainId(request->drainid())));
+            return grpc::Status::OK;
+        },
+        context);
+}
+
+grpc::Status GRPCServer::RedirectSink(grpc::ServerContext* context, const RedirectSinkRequest* request, google::protobuf::Empty*)
+{
+    return tryWithDefaultHandling(
+        [&]
+        {
+            const auto queryId = QueryPlanSerializationUtil::deserializeQueryId(request->queryid());
+            getValueOrThrow(delegate.redirectSink(
+                queryId, request->channel(), RedirectTarget{.connection = request->connection(), .channel = request->newchannel()}));
             return grpc::Status::OK;
         },
         context);

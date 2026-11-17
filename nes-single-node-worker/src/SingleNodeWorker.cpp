@@ -14,6 +14,7 @@
 
 #include <SingleNodeWorker.hpp>
 
+#include <any>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,8 @@
 #include <Listeners/QueryLog.hpp>
 #include <Plans/LogicalPlan.hpp>
 #include <Runtime/NodeEngineBuilder.hpp>
+#include <Sinks/NetworkSink.hpp>
+#include <Sources/NetworkSource.hpp>
 
 #include <Util/DumpMode.hpp>
 #include <Util/Logger/Logger.hpp>
@@ -36,11 +39,14 @@
 #include <Util/UUID.hpp>
 #include <cpptrace/from_current.hpp>
 #include <fmt/format.h>
+#include <CompiledQueryPlan.hpp>
 #include <CompositeStatisticListener.hpp>
+#include <DrainState.hpp>
 #include <ErrorHandling.hpp>
 #include <GoogleEventTracePrinter.hpp>
 #include <NetworkOptions.hpp>
 #include <QueryCompiler.hpp>
+#include <QueryDrainTracker.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
 #include <SingleNodeWorkerConfiguration.hpp>
@@ -51,12 +57,40 @@ extern void initNetworkServices(const std::string& connectionAddr, const NES::Ho
 namespace NES
 {
 
+namespace
+{
+/// Collects the network channels of a compiled query, which drain requests refer to.
+QueryChannels collectChannels(const CompiledQueryPlan& plan)
+{
+    QueryChannels channels{.networkSources = {}, .networkSinks = {}, .numberOfSources = plan.sources.size()};
+    for (const auto& source : plan.sources)
+    {
+        if (const auto* config = std::any_cast<NetworkSourceConfig>(&source.descriptor.getPluginData().getUnderlying()))
+        {
+            const auto [_, inserted] = channels.networkSources.emplace(config->channel, source.originId);
+            INVARIANT(inserted, "Two network sources of query {} use the channel {}", plan.queryId, config->channel);
+        }
+    }
+    for (const auto& sink : plan.sinks)
+    {
+        if (const auto* config = std::any_cast<NetworkSinkConfig>(&sink.descriptor.getPluginData().getUnderlying()))
+        {
+            const auto [_, inserted] = channels.networkSinks.emplace(config->channel);
+            INVARIANT(inserted, "Two network sinks of query {} use the channel {}", plan.queryId, config->channel);
+        }
+    }
+    return channels;
+}
+}
+
 SingleNodeWorker::~SingleNodeWorker() = default;
 SingleNodeWorker::SingleNodeWorker(SingleNodeWorker&& other) noexcept = default;
 SingleNodeWorker& SingleNodeWorker::operator=(SingleNodeWorker&& other) noexcept = default;
 
 SingleNodeWorker::SingleNodeWorker(const SingleNodeWorkerConfiguration& configuration, const Host& host)
-    : listener(std::make_shared<CompositeStatisticListener>()), configuration(configuration)
+    : listener(std::make_shared<CompositeStatisticListener>())
+    , drainTracker(std::make_unique<QueryDrainTracker>())
+    , configuration(configuration)
 {
     NES_INFO("Starting SingleNodeWorker {}", host.getRawValue());
     if (configuration.enableGoogleEventTrace)
@@ -115,12 +149,62 @@ std::expected<QueryId, Exception> SingleNodeWorker::startQuery(LogicalPlan plan)
         request->dumpCompilationResult = dumpMode;
         auto result = compiler->compileQuery(std::move(request));
         INVARIANT(result, "expected successful query compilation or exception, but got nothing");
-        nodeEngine->startQuery(plan.getQueryId(), std::move(result));
+        auto channels = collectChannels(*result);
+        auto drainState = std::make_shared<DrainState>();
+        nodeEngine->startQuery(plan.getQueryId(), std::move(result), drainState);
+        drainTracker->registerQuery(plan.getQueryId(), std::move(channels), std::move(drainState));
         return plan.getQueryId();
     }
     CPPTRACE_CATCH(...)
     {
         return std::unexpected(wrapExternalException());
+    }
+    std::unreachable();
+}
+
+std::expected<void, Exception> SingleNodeWorker::drainQuery(const QueryId& queryId, const DrainRequest& request) noexcept
+{
+    CPPTRACE_TRY
+    {
+        drainTracker->configureDrain(queryId, request);
+        return {};
+    }
+    CPPTRACE_CATCH(...)
+    {
+        return std::unexpected{wrapExternalException()};
+    }
+    std::unreachable();
+}
+
+std::expected<void, Exception> SingleNodeWorker::startDrain(const QueryId& queryId, const DrainId drainId) noexcept
+{
+    CPPTRACE_TRY
+    {
+        const auto sourcesEndingWithMarker = drainTracker->sourcesEndingWithMarker(queryId, drainId);
+        if (!nodeEngine->drainSources(queryId, drainId, sourcesEndingWithMarker))
+        {
+            throw InvalidDrainRequest("query {} is not running, so drain {} cannot start", queryId, drainId);
+        }
+        return {};
+    }
+    CPPTRACE_CATCH(...)
+    {
+        return std::unexpected{wrapExternalException()};
+    }
+    std::unreachable();
+}
+
+std::expected<void, Exception>
+SingleNodeWorker::redirectSink(const QueryId& queryId, const std::string& channel, RedirectTarget target) noexcept
+{
+    CPPTRACE_TRY
+    {
+        drainTracker->redirectSink(queryId, channel, std::move(target));
+        return {};
+    }
+    CPPTRACE_CATCH(...)
+    {
+        return std::unexpected{wrapExternalException()};
     }
     std::unreachable();
 }

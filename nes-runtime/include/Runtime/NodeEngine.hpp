@@ -14,6 +14,7 @@
 
 #pragma once
 #include <memory>
+#include <unordered_set>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
 #include <Listeners/SystemEventListener.hpp>
@@ -21,6 +22,7 @@
 
 #include <Sources/SourceProvider.hpp>
 #include <CompiledQueryPlan.hpp>
+#include <DrainState.hpp>
 #include <QueryEngine.hpp>
 #include <QueryId.hpp>
 
@@ -46,10 +48,15 @@ public:
         std::unique_ptr<QueryEngine> queryEngine,
         std::unique_ptr<SourceProvider> sourceProvider);
 
-    void startQuery(QueryId queryId, std::unique_ptr<CompiledQueryPlan> compiledQueryPlan);
+    /// The drain state is shared with the running query, so the caller can configure the drain of the query while it is running.
+    void startQuery(QueryId queryId, std::unique_ptr<CompiledQueryPlan> compiledQueryPlan, std::shared_ptr<DrainState> drainState);
     /// Termination will happen asynchronously, thus the query might very well be running for an indeterminate time after this method has
     /// been called.
     void stopQuery(QueryId queryId);
+
+    /// Drains the sources of the running query, except for the sources which end with a marker. Returns false if the query is not running
+    /// or the drain has not been configured.
+    bool drainSources(const QueryId& queryId, DrainId drainId, const std::unordered_set<OriginId>& sourcesEndingWithMarker);
 
     [[nodiscard]] std::shared_ptr<BufferManager> getBufferManager() { return bufferManager; }
 
