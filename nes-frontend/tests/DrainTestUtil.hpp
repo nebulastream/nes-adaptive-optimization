@@ -14,8 +14,12 @@
 
 #pragma once
 
+#include <algorithm>
+#include <any>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #include <DataTypes/DataType.hpp>
 #include <DataTypes/UnboundField.hpp>
 #include <Identifiers/Identifier.hpp>
@@ -28,14 +32,82 @@
 #include <QueryManager/DrainPlanner.hpp>
 #include <SQLQueryParser/AntlrSQLQueryParser.hpp>
 #include <Schema/Schema.hpp>
+#include <Sinks/NetworkSink.hpp>
 #include <Sinks/SinkCatalog.hpp>
+#include <Sources/NetworkSource.hpp>
 #include <Sources/SourceCatalog.hpp>
 #include <Util/UUID.hpp>
 #include <gtest/gtest.h>
+#include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 
 namespace NES::Testing
 {
+
+/// The channel of the network sink of a local plan.
+inline std::string networkSinkChannel(const LogicalPlan& plan)
+{
+    for (const auto& sink : getOperatorByType<SinkLogicalOperator>(plan))
+    {
+        if (const auto descriptor = sink->getSinkDescriptor())
+        {
+            if (const auto* config = std::any_cast<NetworkSinkConfig>(&descriptor->getPluginData().getUnderlying()))
+            {
+                return config->channel;
+            }
+        }
+    }
+    throw TestException("the plan has no network sink");
+}
+
+/// Replaces the network source of `op`'s subtree by `replacement`.
+inline LogicalOperator replaceNetworkSource(const LogicalOperator& op, const LogicalOperator& replacement)
+{
+    if (const auto source = op.tryGetAs<SourceDescriptorLogicalOperator>())
+    {
+        const auto descriptor = source.value()->getSourceDescriptor();
+        if (std::any_cast<NetworkSourceConfig>(&descriptor.getPluginData().getUnderlying()) != nullptr)
+        {
+            return replacement;
+        }
+        return op;
+    }
+    std::vector<LogicalOperator> children;
+    for (const auto& child : op.getChildren())
+    {
+        children.push_back(replaceNetworkSource(child, replacement));
+    }
+    return op.withChildrenUnsafe(std::move(children));
+}
+
+/// A copy of `original` whose network source listens on the new channel `channel`.
+inline LogicalPlan
+withNewSourceChannel(const LogicalPlan& original, const SourceCatalog& sourceCatalog, const std::string& channel, const QueryId& queryId)
+{
+    const auto sources = getOperatorByType<SourceDescriptorLogicalOperator>(original);
+    const auto isNetworkSource = [](const auto& source)
+    { return std::any_cast<NetworkSourceConfig>(&source->getSourceDescriptor().getPluginData().getUnderlying()) != nullptr; };
+    EXPECT_EQ(std::ranges::count_if(sources, isNetworkSource), 1);
+    const auto& oldSource = *std::ranges::find_if(sources, isNetworkSource);
+    const auto oldDescriptor = oldSource->getSourceDescriptor();
+    const auto& oldConfig = std::any_cast<const NetworkSourceConfig&>(oldDescriptor.getPluginData().getUnderlying());
+
+    const auto descriptor = sourceCatalog.getAnonymousSource(
+        Identifier::parse("Network"),
+        oldDescriptor.getSchema(),
+        oldDescriptor.getHost(),
+        {{Identifier::parse("type"), "NATIVE"}},
+        {{Identifier::parse("channel"), channel}, {Identifier::parse("bind"), oldConfig.bind}});
+    EXPECT_TRUE(descriptor.has_value());
+    const auto newSource = SourceDescriptorLogicalOperator::create(*descriptor).withTraitSet(oldSource.getTraitSet());
+
+    std::vector<LogicalOperator> roots;
+    for (const auto& root : original.getRootOperators())
+    {
+        roots.push_back(replaceNetworkSource(root, newSource));
+    }
+    return LogicalPlan(queryId, roots);
+}
 
 inline LocalQueryRef localQuery(const std::string& host)
 {
@@ -53,7 +125,10 @@ inline std::string bindOf(const std::string& channel)
 class LocalPlanBuilder
 {
 public:
-    const std::string& id(const std::string& channel) { return channelIds.try_emplace(channel, UUIDToString(generateUUID())).first->second; }
+    const std::string& id(const std::string& channel)
+    {
+        return channelIds.try_emplace(channel, UUIDToString(generateUUID())).first->second;
+    }
 
     [[nodiscard]] LogicalOperator localSource() const
     {
@@ -104,8 +179,8 @@ public:
 
     [[nodiscard]] static LogicalOperator window(const LogicalOperator& child)
     {
-        const auto parsed
-            = AntlrSQLQueryParser::createLogicalQueryPlanFromSQLString("SELECT SUM(a) AS s FROM src WINDOW TUMBLING(a, size 1 sec) INTO snk");
+        const auto parsed = AntlrSQLQueryParser::createLogicalQueryPlanFromSQLString(
+            "SELECT SUM(a) AS s FROM src WINDOW TUMBLING(a, size 1 sec) INTO snk");
         const auto windows = getOperatorByType<WindowedAggregationLogicalOperator>(parsed);
         EXPECT_EQ(windows.size(), 1);
         return windows.front().withChildrenUnsafe({child});

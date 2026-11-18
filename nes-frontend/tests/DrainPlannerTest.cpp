@@ -28,8 +28,8 @@
 #include <Util/Logger/Logger.hpp>
 #include <gtest/gtest.h>
 #include <BaseUnitTest.hpp>
-#include <DrainTestUtil.hpp>
 #include <DrainRequest.hpp>
+#include <DrainTestUtil.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 #include <SinkDrain.hpp>
@@ -76,7 +76,11 @@ TEST_F(DrainPlannerTest, DrainsAWholeChainWithMarkers)
     EXPECT_EQ(
         drain.requests.at(a),
         (DrainRequest{
-            .drainId = DRAIN, .drainsQuery = true, .stopLocalSources = true, .markerChannels = {}, .sinkModes = {{id("ab"), SinkDrainMode::ForwardMarker}}}));
+            .drainId = DRAIN,
+            .drainsQuery = true,
+            .stopLocalSources = true,
+            .markerChannels = {},
+            .sinkModes = {{id("ab"), SinkDrainMode::ForwardMarker}}}));
     EXPECT_EQ(
         drain.requests.at(b),
         (DrainRequest{
@@ -134,7 +138,8 @@ TEST_F(DrainPlannerTest, DrainsAMergeOfADrainedAndARunningUpstreamQuery)
     EXPECT_EQ(sorted(startHosts), (std::vector<std::string>{"a", "b"}));
     EXPECT_TRUE(drain.requests.at(b).stopLocalSources);
     EXPECT_EQ(drain.requests.at(b).markerChannels, std::vector<std::string>{id("ab")});
-    EXPECT_EQ(drain.requests.at(other).sinkModes, (std::unordered_map<std::string, SinkDrainMode>{{id("ob"), SinkDrainMode::BufferOnDetach}}));
+    EXPECT_EQ(
+        drain.requests.at(other).sinkModes, (std::unordered_map<std::string, SinkDrainMode>{{id("ob"), SinkDrainMode::BufferOnDetach}}));
     EXPECT_FALSE(drain.requests.at(other).drainsQuery);
 }
 
@@ -164,7 +169,9 @@ TEST_F(DrainPlannerTest, RedirectsToTheBindAddressOfTheTargetSource)
     const auto target = Testing::localQuery("target");
     localQueries.emplace(target, plan(localSink(networkSource("new"))));
 
-    EXPECT_EQ(planRedirect(localQueries, a, id("ab"), target, id("new")), (RedirectTarget{.connection = Testing::bindOf("new"), .channel = id("new")}));
+    EXPECT_EQ(
+        planRedirect(localQueries, a, id("ab"), target, id("new")),
+        (RedirectTarget{.connection = Testing::bindOf("new"), .channel = id("new")}));
     EXPECT_THROW((void)planRedirect(localQueries, a, id("unknown"), target, id("new")), Exception);
     EXPECT_THROW((void)planRedirect(localQueries, a, id("ab"), target, id("unknown")), Exception);
     EXPECT_THROW((void)planRedirect(localQueries, Testing::localQuery("unknown"), id("ab"), target, id("new")), Exception);

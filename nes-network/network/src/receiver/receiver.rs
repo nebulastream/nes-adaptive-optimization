@@ -39,6 +39,8 @@ pub enum ReceiverChannelResult {
     Ok(TupleBuffer),
     /// The sender was drained. The stream ends after the marker.
     Marker(DrainId),
+    /// The sender has left without ending the stream; the next buffer comes from a new sender.
+    SenderDetached,
     Closed,
     Error(Error),
 }
@@ -58,6 +60,7 @@ impl ReceiverChannel {
         match self.queue.recv_blocking() {
             Ok(ReceivedItem::Buffer(buffer)) => ReceiverChannelResult::Ok(buffer),
             Ok(ReceivedItem::Marker(drain_id)) => ReceiverChannelResult::Marker(drain_id),
+            Ok(ReceivedItem::SenderDetached) => ReceiverChannelResult::SenderDetached,
             Err(_) => ReceiverChannelResult::Closed,
         }
     }

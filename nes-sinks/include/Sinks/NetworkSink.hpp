@@ -86,6 +86,8 @@ protected:
     std::ostream& toString(std::ostream& str) const override;
 
 private:
+    /// Drops the data of a channel which waits to be redirected, as the query stops before it was redirected.
+    void dropBufferedData();
     /// Redirects the channel once its receiver has detached and the worker has set a redirect target for it.
     void redirectIfRequested(PipelineExecutionContext& pec);
 

@@ -125,7 +125,8 @@ protected:
             workers->addWorker(Host(host), std::string(host) + ":9090", CapacityKind::Unlimited{}, {});
         }
         manager = std::make_unique<QueryManager>(
-            workers, [recorder = recorder](const WorkerConfig& config) -> UniquePtr<QuerySubmissionBackend>
+            workers,
+            [recorder = recorder](const WorkerConfig& config) -> UniquePtr<QuerySubmissionBackend>
             { return std::make_unique<FakeBackend>(config.host.getRawValue(), recorder); });
     }
 
@@ -149,7 +150,9 @@ protected:
     {
         return start(
             "chain",
-            {{"a", networkSink(localSource(), "ab")}, {"b", networkSink(networkSource("ab"), "bc")}, {"c", localSink(networkSource("bc"))}});
+            {{"a", networkSink(localSource(), "ab")},
+             {"b", networkSink(networkSource("ab"), "bc")},
+             {"c", localSink(networkSource("bc"))}});
     }
 
     LocalQueryRef localQueryOn(const DistributedQueryId& query, const std::string& host) const

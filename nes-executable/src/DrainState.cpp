@@ -87,6 +87,11 @@ void DrainState::markStopped()
     internal.wlock()->stopped = true;
 }
 
+bool DrainState::isStopped() const
+{
+    return internal.rlock()->stopped;
+}
+
 bool DrainState::isDrained() const
 {
     const auto locked = internal.rlock();

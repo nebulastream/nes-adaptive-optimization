@@ -154,5 +154,24 @@ TEST_F(BackpressureHandlerTest, BackpressureRemainsUntilBacklogDrains)
     EXPECT_FALSE(controller.releasePressure());
     EXPECT_TRUE(handler.empty());
 }
+
+TEST_F(BackpressureHandlerTest, ClearDropsQueuedBuffersAndReleasesBackpressure)
+{
+    auto [controller, listener] = createBackpressureChannel();
+    BackpressureHandler handler(2, 0);
+    const auto a = makeBuffer(OriginId{1}, SequenceNumber{1}, ChunkNumber{1});
+    const auto b = makeBuffer(OriginId{1}, SequenceNumber{2}, ChunkNumber{1});
+    const auto c = makeBuffer(OriginId{1}, SequenceNumber{3}, ChunkNumber{1});
+
+    expectBuffer(handler.onFull(a, controller), a);
+    EXPECT_FALSE(handler.onFull(b, controller));
+    EXPECT_FALSE(handler.onFull(c, controller));
+    EXPECT_FALSE(handler.empty());
+
+    /// a is pending at its retry task, b and c are queued.
+    EXPECT_EQ(handler.clear(controller), 2);
+    EXPECT_TRUE(handler.empty());
+    EXPECT_TRUE(controller.applyPressure()) << "clear did not release backpressure";
+}
 }
 }

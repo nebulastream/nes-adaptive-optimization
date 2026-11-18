@@ -14,11 +14,13 @@
 
 #include <Sources/NetworkSource.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
 #include <ostream>
+#include <ranges>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -28,6 +30,7 @@
 #include <Configurations/InstantiatedConfigValue.hpp>
 #include <Configurations/Validation/EndpointValidation.hpp>
 #include <Identifiers/Identifier.hpp>
+#include <Identifiers/Identifiers.hpp>
 #include <Runtime/AbstractBufferProvider.hpp>
 #include <Runtime/TupleBuffer.hpp>
 #include <Schema/Schema.hpp>
@@ -111,6 +114,28 @@ const ConfigField<size_t> RECEIVER_QUEUE_SIZE{
 
 }
 
+void SequenceRenumbering::renumber(TupleBuffer& buffer)
+{
+    auto& sequences = origins[buffer.getOriginId()];
+    const auto sequenceNumber = buffer.getSequenceNumber().getRawValue();
+    if (sequences.newSender)
+    {
+        sequences.offset = sequenceNumber <= sequences.highest ? sequences.highest : 0;
+        sequences.newSender = false;
+    }
+    const auto renumbered = sequenceNumber + sequences.offset;
+    buffer.setSequenceNumber(SequenceNumber(renumbered));
+    sequences.highest = std::max(sequences.highest, renumbered);
+}
+
+void SequenceRenumbering::startNewSender()
+{
+    for (auto& sequences : origins | std::views::values)
+    {
+        sequences.newSender = true;
+    }
+}
+
 Schema<QualifiedErasedConfigField, Ordered> NetworkSource::getConfigSchema()
 {
     return createConfigSchema(Identifier::parse("NETWORK_SOURCE"), CHANNEL, BIND, RECEIVER_QUEUE_SIZE);
@@ -172,23 +197,33 @@ Source::FillTupleBufferResult NetworkSource::fillTupleBuffer(TupleBuffer& tupleB
     /// If the source is requested to shutdown the network channel is closed, which will interrupt the call to receive_buffer.
     const std::stop_callback callback(stopToken, [this] { interrupt_receive(**channel); });
 
-    const auto result = receive_buffer(**channel, builder);
-    switch (result.kind)
+    while (true)
     {
-        case ReceiveKind::Buffer:
-            return FillTupleBufferResult::withBytes(tupleBuffer.getNumberOfTuples()); /// Received one buffer
-        case ReceiveKind::Marker: {
-            /// The sender was drained and closes the channel right after the marker, so the marker ends the stream.
-            NES_DEBUG("Receiver channel {} received marker of drain {}", channelId, result.drain_id);
-            return FillTupleBufferResult::marker(DrainId(result.drain_id));
+        const auto result = receive_buffer(**channel, builder);
+        switch (result.kind)
+        {
+            case ReceiveKind::Buffer:
+                sequenceRenumbering.renumber(tupleBuffer);
+                return FillTupleBufferResult::withBytes(tupleBuffer.getNumberOfTuples()); /// Received one buffer
+            case ReceiveKind::Marker: {
+                /// The sender was drained and closes the channel right after the marker, so the marker ends the stream.
+                NES_DEBUG("Receiver channel {} received marker of drain {}", channelId, result.drain_id);
+                return FillTupleBufferResult::marker(DrainId(result.drain_id));
+            }
+            case ReceiveKind::SenderDetached:
+                /// The stream goes on with the next sender to attach.
+                NES_INFO(
+                    "Sender of receiver channel {} detached, renumbering the next sender if it restarts its sequence numbers", channelId);
+                sequenceRenumbering.startNewSender();
+                continue;
+            case ReceiveKind::Closed:
+                /// The queue was closed.
+                /// The SourceThread logic will figure out if the queue was closed by an external source (i.e. the other side of the network
+                /// connection) or because of a stop_request.
+                return FillTupleBufferResult::eos(); /// End of Stream
         }
-        case ReceiveKind::Closed:
-            /// The queue was closed.
-            /// The SourceThread logic will figure out if the queue was closed by an external source (i.e. the other side of the network
-            /// connection) or because of a stop_request.
-            return FillTupleBufferResult::eos(); /// End of Stream
+        std::unreachable();
     }
-    std::unreachable();
 }
 
 void NetworkSource::close()

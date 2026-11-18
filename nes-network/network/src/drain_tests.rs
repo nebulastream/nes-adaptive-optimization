@@ -72,6 +72,7 @@ fn buffer(sequence_number: u64) -> TupleBuffer {
 enum Received {
     Buffer(u64),
     Marker(u64),
+    SenderDetached,
     Closed,
 }
 
@@ -83,6 +84,7 @@ fn receive(channel: &Arc<ReceiverChannel>) -> Received {
         let result = match channel.receive() {
             ReceiverChannelResult::Ok(buffer) => Received::Buffer(buffer.sequence_number),
             ReceiverChannelResult::Marker(drain_id) => Received::Marker(drain_id),
+            ReceiverChannelResult::SenderDetached => Received::SenderDetached,
             ReceiverChannelResult::Closed => Received::Closed,
             ReceiverChannelResult::Error(e) => panic!("receive failed: {e}"),
         };
@@ -159,6 +161,7 @@ fn sender_detach_keeps_the_receiver_channel_open_for_a_new_sender() {
 
     assert_eq!(receive(&receiver_channel), Received::Buffer(1));
     assert_eq!(receive(&receiver_channel), Received::Buffer(2));
+    assert_eq!(receive(&receiver_channel), Received::SenderDetached);
 
     let second = register_sender(&second_sender, 1002, "c");
     send(&second, 3);
@@ -199,7 +202,7 @@ fn receiver_detach_parks_the_sender_until_it_is_redirected() {
         match receive(&old_channel) {
             Received::Buffer(i) => received.push(i),
             Received::Closed => break,
-            Received::Marker(_) => panic!("unexpected marker"),
+            other => panic!("unexpected {other:?}"),
         }
     }
     assert!((received.len() as u64) < NUMBER_OF_BUFFERS);

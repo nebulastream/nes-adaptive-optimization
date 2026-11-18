@@ -51,6 +51,9 @@ pub enum ReceivedItem {
     Buffer(TupleBuffer),
     /// The sender was drained. It is followed by the end of the stream.
     Marker(DrainId),
+    /// The sender has left without ending the stream. Everything after this item comes from the next sender to attach, which numbers
+    /// its buffers independently of the previous one.
+    SenderDetached,
 }
 
 pub(super) type DataQueue = async_channel::Sender<ReceivedItem>;
@@ -133,7 +136,7 @@ async fn channel_handler<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             // Markers are not acknowledged, only data is.
             let sequence = match &pending_item {
                 ReceivedItem::Buffer(buffer) => Some(buffer.sequence()),
-                ReceivedItem::Marker(_) => None,
+                ReceivedItem::Marker(_) | ReceivedItem::SenderDetached => None,
             };
             // About to (possibly) block on a full queue: don't hold back the acks of the buffers that were already accepted.
             if unflushed_acks > 0 && buffer_queue.is_full() {
@@ -319,6 +322,12 @@ pub(super) fn create_channel_handler<
                 ChannelHandlerStatus::DetachedByOtherSide => {
                     // Like a retry, but without an error: the channel waits for the next sender.
                     info!("Channel detached by other side. Waiting for a new sender.");
+                    // Everything the previous sender sent has been queued, so the software side learns about the change
+                    // between its last buffer and the first buffer of the next sender. A closed queue ends the channel
+                    // when the next sender attaches.
+                    let _ = channel_cancellation_token
+                        .run_until_cancelled(buffer_queue.send(ReceivedItem::SenderDetached))
+                        .await;
                     let _ = control
                         .send(NetworkServiceControlCommand::RetryChannel(
                             channel,

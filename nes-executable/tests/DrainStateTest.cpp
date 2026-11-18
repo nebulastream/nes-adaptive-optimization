@@ -140,7 +140,9 @@ TEST_F(DrainStateTest, stoppedQueryIsNotDrained)
     DrainState state;
     ASSERT_TRUE(state.configure(configuration(1)));
     state.recordSourceEnd(OriginId(1), DrainId(1));
+    EXPECT_FALSE(state.isStopped());
     state.markStopped();
+    EXPECT_TRUE(state.isStopped());
     EXPECT_FALSE(state.isDrained());
 }
 

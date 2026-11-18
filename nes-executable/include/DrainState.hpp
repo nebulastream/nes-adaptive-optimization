@@ -69,6 +69,9 @@ public:
     /// Records that the query is being stopped. A stopped query is not drained, even if some of its sources were drained before.
     void markStopped();
 
+    /// Returns true if the query is being stopped.
+    [[nodiscard]] bool isStopped() const;
+
     /// Returns true if the query drains itself and has been drained so far: it is not being stopped, at least one source has ended,
     /// and every source which ended was drained by the configured drain. A network sink checks this before it ends its channel in
     /// its drain mode, as all sources upstream of it have ended by then.

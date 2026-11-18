@@ -29,3 +29,11 @@ target_include_directories(query-manager-drain-test PRIVATE ${CMAKE_CURRENT_SOUR
 
 add_nes_test(drain-integration-test DrainIntegrationTest.cpp)
 target_link_libraries(drain-integration-test nes-frontend-embedded-lib)
+target_include_directories(drain-integration-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Starts nes-single-node-worker processes and drives them over gRPC.
+add_nes_test(drain-grpc-test DrainGrpcTest.cpp)
+target_link_libraries(drain-grpc-test nes-frontend-lib)
+target_include_directories(drain-grpc-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(drain-grpc-test PRIVATE NES_WORKER_BINARY="$<TARGET_FILE:nes-single-node-worker>")
+add_dependencies(drain-grpc-test nes-single-node-worker)

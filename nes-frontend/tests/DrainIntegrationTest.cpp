@@ -52,6 +52,7 @@
 #include <BaseUnitTest.hpp>
 #include <DistributedLogicalPlan.hpp>
 #include <DistributedQuery.hpp>
+#include <DrainTestUtil.hpp>
 #include <ErrorHandling.hpp>
 #include <ModelCatalog.hpp>
 #include <QueryId.hpp>
@@ -69,41 +70,6 @@ namespace
 const Host A("a:8080");
 const Host B("b:8080");
 const Host C("c:8080");
-
-std::string networkSinkChannel(const LogicalPlan& plan)
-{
-    for (const auto& sink : getOperatorByType<SinkLogicalOperator>(plan))
-    {
-        if (const auto descriptor = sink->getSinkDescriptor())
-        {
-            if (const auto* config = std::any_cast<NetworkSinkConfig>(&descriptor->getPluginData().getUnderlying()))
-            {
-                return config->channel;
-            }
-        }
-    }
-    throw TestException("the plan has no network sink");
-}
-
-/// Replaces the network source of `op`'s subtree by `replacement`.
-LogicalOperator replaceNetworkSource(const LogicalOperator& op, const LogicalOperator& replacement)
-{
-    if (const auto source = op.tryGetAs<SourceDescriptorLogicalOperator>())
-    {
-        const auto descriptor = source.value()->getSourceDescriptor();
-        if (std::any_cast<NetworkSourceConfig>(&descriptor.getPluginData().getUnderlying()) != nullptr)
-        {
-            return replacement;
-        }
-        return op;
-    }
-    std::vector<LogicalOperator> children;
-    for (const auto& child : op.getChildren())
-    {
-        children.push_back(replaceNetworkSource(child, replacement));
-    }
-    return op.withChildrenUnsafe(std::move(children));
-}
 }
 
 /// Runs the chain a → b → c on three embedded workers, which talk to each other over the network: a generator on a, a relay on b
@@ -124,8 +90,10 @@ protected:
         /// Every test uses its own data addresses, because the network services are process-wide singletons.
         static size_t testCounter = 0;
         ++testCounter;
-        dataAddresses = {
-            {A, fmt::format("a{}:9090", testCounter)}, {B, fmt::format("b{}:9090", testCounter)}, {C, fmt::format("c{}:9090", testCounter)}};
+        dataAddresses
+            = {{A, fmt::format("a{}:9090", testCounter)},
+               {B, fmt::format("b{}:9090", testCounter)},
+               {C, fmt::format("c{}:9090", testCounter)}};
 
         const Schema<UnqualifiedUnboundField, Ordered> schema{
             UnqualifiedUnboundField{Identifier::parse("id"), DataType::Type::UINT64},
@@ -134,9 +102,17 @@ protected:
             CreateWorkerStatement{
                 .host = C.getRawValue(), .dataAddress = dataAddresses.at(C), .maxOperators = 1, .downstream = {}, .config = {}},
             CreateWorkerStatement{
-                .host = B.getRawValue(), .dataAddress = dataAddresses.at(B), .maxOperators = 0, .downstream = {C.getRawValue()}, .config = {}},
+                .host = B.getRawValue(),
+                .dataAddress = dataAddresses.at(B),
+                .maxOperators = 0,
+                .downstream = {C.getRawValue()},
+                .config = {}},
             CreateWorkerStatement{
-                .host = A.getRawValue(), .dataAddress = dataAddresses.at(A), .maxOperators = 0, .downstream = {B.getRawValue()}, .config = {}},
+                .host = A.getRawValue(),
+                .dataAddress = dataAddresses.at(A),
+                .maxOperators = 0,
+                .downstream = {B.getRawValue()},
+                .config = {}},
             CreateLogicalSourceStatement{.name = Identifier::parse("numbers"), .schema = schema},
             CreatePhysicalSourceStatement{
                 .attachedTo = LogicalSourceName(Identifier::parse("numbers")),
@@ -228,30 +204,9 @@ protected:
     /// Starts a copy of c's local plan, whose network source listens on a new channel, as a new distributed query.
     std::pair<DistributedQueryId, std::string> startSuccessorOnC()
     {
-        const auto& original = (*plan)[C].front();
-        const auto networkSources = getOperatorByType<SourceDescriptorLogicalOperator>(original);
-        EXPECT_EQ(networkSources.size(), 1);
-        const auto& oldSource = networkSources.front();
-        const auto oldDescriptor = oldSource->getSourceDescriptor();
-        const auto& oldConfig = std::any_cast<const NetworkSourceConfig&>(oldDescriptor.getPluginData().getUnderlying());
-
         const auto channel = UUIDToString(generateUUID());
-        const auto descriptor = sources->getAnonymousSource(
-            Identifier::parse("Network"),
-            oldDescriptor.getSchema(),
-            oldDescriptor.getHost(),
-            {{Identifier::parse("type"), "NATIVE"}},
-            {{Identifier::parse("channel"), channel}, {Identifier::parse("bind"), oldConfig.bind}});
-        EXPECT_TRUE(descriptor.has_value());
-        const auto newSource = SourceDescriptorLogicalOperator::create(*descriptor).withTraitSet(oldSource.getTraitSet());
-
-        const auto successorId = QueryId::createDistributed(DistributedQueryId("successor"));
-        std::vector<LogicalOperator> roots;
-        for (const auto& root : original.getRootOperators())
-        {
-            roots.push_back(replaceNetworkSource(root, newSource));
-        }
-        const LogicalPlan successor(successorId, roots);
+        const auto successor = Testing::withNewSourceChannel(
+            (*plan)[C].front(), *sources, channel, QueryId::createDistributed(DistributedQueryId("successor")));
         const auto started = manager->start(DistributedLogicalPlan({{C, {successor}}}, successor));
         EXPECT_TRUE(started.has_value());
         return {*started, channel};
@@ -283,7 +238,7 @@ TEST_F(DrainIntegrationTest, BuffersUpstreamOfAMidChainDrainUntilItIsRedirected)
 
     const auto [successor, channel] = startSuccessorOnC();
     waitFor({{at(C, successor), QueryStatus::Running}});
-    const auto redirected = manager->redirectSink(at(A), networkSinkChannel((*plan)[A].front()), at(C, successor), channel);
+    const auto redirected = manager->redirectSink(at(A), Testing::networkSinkChannel((*plan)[A].front()), at(C, successor), channel);
     ASSERT_TRUE(redirected.has_value()) << redirected.error();
 
     /// The generator keeps sending to the successor; neither side fails.

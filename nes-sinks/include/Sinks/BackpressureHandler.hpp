@@ -67,6 +67,10 @@ public:
     std::optional<TupleBuffer> onFull(TupleBuffer buffer, BackpressureController& backpressureController);
     std::optional<TupleBuffer> onSuccess(const TupleBuffer& buffer, BackpressureController& backpressureController);
     [[nodiscard]] bool empty() const;
+
+    /// Drops every queued buffer and releases backpressure, e.g. when a sink stops before it could send them. A pending buffer stays with
+    /// its retry task. Returns the number of dropped buffers.
+    size_t clear(BackpressureController& backpressureController);
 };
 
 }

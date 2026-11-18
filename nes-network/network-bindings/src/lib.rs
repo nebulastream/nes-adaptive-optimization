@@ -48,6 +48,9 @@ pub mod ffi {
         Marker,
         /// The stream has ended, or the channel was closed or detached locally.
         Closed,
+        /// The sender has left without ending the stream. The next buffer comes from a new sender, which numbers its buffers
+        /// independently of the previous one.
+        SenderDetached,
     }
 
     struct ReceiveResult {
@@ -415,6 +418,12 @@ fn receive_buffer(
         ReceiverChannelResult::Closed => {
             return Ok(ffi::ReceiveResult {
                 kind: ffi::ReceiveKind::Closed,
+                drain_id: 0,
+            });
+        }
+        ReceiverChannelResult::SenderDetached => {
+            return Ok(ffi::ReceiveResult {
+                kind: ffi::ReceiveKind::SenderDetached,
                 drain_id: 0,
             });
         }

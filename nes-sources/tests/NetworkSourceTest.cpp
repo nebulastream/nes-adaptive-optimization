@@ -210,6 +210,63 @@ TEST_F(NetworkSourceTest, DrainDetachesAndKeepsUnreceivedDataAtTheSender)
     EXPECT_EQ(sequenceNumbers, expected);
 }
 
+/// A sender that attaches after the previous one detached numbers its buffers from the start. The source continues the sequence numbers of
+/// the previous sender, so that every sequence number reaches downstream operators once.
+TEST_F(NetworkSourceTest, ContinuesTheSequenceNumbersOfADetachedSender)
+{
+    startServices("receiver:2004", "sender:2004", 10);
+    NetworkSource source(NetworkSourceConfig{.channel = "c", .bind = "receiver:2004", .receiverQueueSize = 0});
+    source.open(bufferManager);
+
+    auto first = registerSender("sender:2004", "receiver:2004", "c");
+    for (uint64_t i = 1; i <= 3; ++i)
+    {
+        send(*first, i);
+    }
+    waitForFlushResult(*first, FlushResult::Flushed);
+    detach_sender_channel(std::move(first));
+
+    auto second = registerSender("sender:2004", "receiver:2004", "c");
+    for (uint64_t i = 1; i <= 2; ++i)
+    {
+        send(*second, i);
+    }
+    waitForFlushResult(*second, FlushResult::Flushed);
+    close_sender_channel(std::move(second));
+
+    const auto received = receiveUntilEndOfStream(source, *bufferManager);
+    EXPECT_EQ(received.sequenceNumbers, (std::vector<uint64_t>{1, 2, 3, 4, 5}));
+    source.close();
+}
+
+/// A sender that continues the sequence numbers of the previous one, e.g. a successor which took over its state, keeps them.
+TEST_F(NetworkSourceTest, KeepsTheSequenceNumbersOfASenderWhichContinuesThem)
+{
+    startServices("receiver:2005", "sender:2005", 10);
+    NetworkSource source(NetworkSourceConfig{.channel = "c", .bind = "receiver:2005", .receiverQueueSize = 0});
+    source.open(bufferManager);
+
+    auto first = registerSender("sender:2005", "receiver:2005", "c");
+    for (uint64_t i = 1; i <= 3; ++i)
+    {
+        send(*first, i);
+    }
+    waitForFlushResult(*first, FlushResult::Flushed);
+    detach_sender_channel(std::move(first));
+
+    auto second = registerSender("sender:2005", "receiver:2005", "c");
+    for (uint64_t i = 4; i <= 5; ++i)
+    {
+        send(*second, i);
+    }
+    waitForFlushResult(*second, FlushResult::Flushed);
+    close_sender_channel(std::move(second));
+
+    const auto received = receiveUntilEndOfStream(source, *bufferManager);
+    EXPECT_EQ(received.sequenceNumbers, (std::vector<uint64_t>{1, 2, 3, 4, 5}));
+    source.close();
+}
+
 /// A drain which arrives before the source has been opened detaches the channel as soon as it is opened.
 TEST_F(NetworkSourceTest, DrainBeforeOpenEndsTheStreamRightAway)
 {

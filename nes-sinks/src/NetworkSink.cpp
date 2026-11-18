@@ -143,8 +143,22 @@ void NetworkSink::stop(PipelineExecutionContext& pec)
 
     if (!closed)
     {
-        INVARIANT(backpressureHandler.empty(), "BackpressureHandler is not empty");
         redirectIfRequested(pec);
+        if (detached)
+        {
+            dropBufferedData();
+        }
+    }
+    if (detached)
+    {
+        /// The receiver was drained, but the query stops before anybody redirected the channel.
+        close_sender_channel(*std::move(this->channel));
+        return;
+    }
+
+    if (!closed)
+    {
+        INVARIANT(backpressureHandler.empty(), "BackpressureHandler is not empty");
 
         switch (flush_sender_channel(*this->channel.value()))
         {
@@ -190,6 +204,20 @@ void NetworkSink::stop(PipelineExecutionContext& pec)
     NES_DEBUG("Closing Sender channel {}", channelId);
     close_sender_channel(*std::move(this->channel));
     NES_DEBUG("Sender channel {} closed", channelId);
+}
+
+void NetworkSink::dropBufferedData()
+{
+    if (closed.exchange(true))
+    {
+        return;
+    }
+    /// Nobody can receive the data the sink buffers and the data the channel keeps anymore.
+    const auto dropped = backpressureHandler.clear(backpressureController);
+    NES_WARNING(
+        "Sender channel {} stops while it waits to be redirected, dropping {} buffered buffers and the buffers the channel kept",
+        channelId,
+        dropped);
 }
 
 void NetworkSink::redirectIfRequested(PipelineExecutionContext& pec)
@@ -266,6 +294,12 @@ void NetworkSink::execute(const TupleBuffer& inputBuffer, PipelineExecutionConte
             *channel.value(), metadata, rust::Slice(usedBufferMemory), rust::Slice<const rust::Slice<const uint8_t>>(children));
         if (sendResult == SendResult::Detached && pec.getDrainState().getSinkMode(channelId) == SinkDrainMode::BufferOnDetach)
         {
+            if (pec.getDrainState().isStopped())
+            {
+                /// The query stops before anybody redirected the channel. The retry loop has to end, so that the pipeline can stop.
+                dropBufferedData();
+                return;
+            }
             /// The receiver was drained and the sink keeps its data until it is redirected. The retry loop of the backpressure handler
             /// checks for the redirect.
             if (!detached.exchange(true))

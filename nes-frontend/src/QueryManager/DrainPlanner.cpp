@@ -220,7 +220,9 @@ const ChannelEnds& getEnds(const Topology& topology, const std::string& channel,
 }
 
 DrainPlan planDrain(
-    const DrainId drainId, const std::unordered_map<LocalQueryRef, LogicalPlan>& localQueries, const std::unordered_set<LocalQueryRef>& drained)
+    const DrainId drainId,
+    const std::unordered_map<LocalQueryRef, LogicalPlan>& localQueries,
+    const std::unordered_set<LocalQueryRef>& drained)
 {
     PRECONDITION(drainId != INVALID_DRAIN_ID, "A drain requires a valid drain id");
     if (drained.empty())

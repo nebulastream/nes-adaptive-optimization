@@ -23,9 +23,11 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <Configurations/ConfigField.hpp>
 #include <Configurations/InstantiatedConfigValue.hpp>
+#include <Identifiers/Identifiers.hpp>
 #include <Runtime/AbstractBufferProvider.hpp>
 #include <Runtime/TupleBuffer.hpp>
 #include <Schema/Schema.hpp>
@@ -48,6 +50,30 @@ struct NetworkSourceConfig
     size_t receiverQueueSize;
 
     static std::expected<NetworkSourceConfig, Exception> fromConfig(const InstantiatedConfig& config);
+};
+
+/// Keeps the sequence numbers of a channel unique per origin when a new sender attaches after the previous one detached. A new sender may
+/// number its buffers from the start, e.g. because it is a new instance of the drained upstream query. If its first buffer of an origin
+/// has a sequence number which was already delivered, all of its sequence numbers of that origin are shifted past the highest one
+/// delivered, so that downstream operators see one gapless sequence per origin. A sender which continues the sequence numbers keeps them.
+class SequenceRenumbering
+{
+public:
+    /// Shifts the sequence number of a received buffer.
+    void renumber(TupleBuffer& buffer);
+    /// The buffers renumbered from now on come from a new sender.
+    void startNewSender();
+
+private:
+    struct OriginSequences
+    {
+        SequenceNumber::Underlying offset = 0;
+        SequenceNumber::Underlying highest = 0;
+        /// Set until the first buffer of the origin from a new sender has decided the offset.
+        bool newSender = false;
+    };
+
+    std::unordered_map<OriginId, OriginSequences> origins;
 };
 
 class NetworkSource final : public Source
@@ -87,6 +113,7 @@ private:
     bool drainRequested = false;
     rust::Box<ReceiverNetworkService> receiverServer;
     std::shared_ptr<AbstractBufferProvider> bufferProvider;
+    SequenceRenumbering sequenceRenumbering;
 };
 
 }
