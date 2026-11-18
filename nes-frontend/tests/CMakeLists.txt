@@ -18,3 +18,14 @@ target_include_directories(distributed-planning-test
 
 add_nes_test(grpc-query-submission-backend-test GRPCQuerySubmissionBackendTest.cpp)
 target_link_libraries(grpc-query-submission-backend-test nes-frontend-lib)
+
+add_nes_test(drain-planner-test DrainPlannerTest.cpp)
+target_link_libraries(drain-planner-test nes-frontend-lib)
+target_include_directories(drain-planner-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_nes_test(query-manager-drain-test QueryManagerDrainTest.cpp)
+target_link_libraries(query-manager-drain-test nes-frontend-lib)
+target_include_directories(query-manager-drain-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_nes_test(drain-integration-test DrainIntegrationTest.cpp)
+target_link_libraries(drain-integration-test nes-frontend-embedded-lib)

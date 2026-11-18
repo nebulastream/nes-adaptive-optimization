@@ -14,29 +14,15 @@
 
 #pragma once
 
-#include <cstdint>
 #include <optional>
-#include <ostream>
 #include <string>
 #include <unordered_map>
 #include <Identifiers/Identifiers.hpp>
-#include <Util/Logger/Formatter.hpp>
 #include <folly/Synchronized.h>
+#include <SinkDrain.hpp>
 
 namespace NES
 {
-
-/// How a network sink ends its channel when its query is drained.
-enum class SinkDrainMode : uint8_t
-{
-    /// The downstream query is drained as well: send a drain marker, then close the channel.
-    ForwardMarker,
-    /// The downstream query keeps running: leave the channel without ending the stream, so another sender can attach to it.
-    Detach,
-    /// The sink's own query is not drained, but the downstream query is. When the receiver detaches, the sink keeps its data
-    /// until it is redirected to a new receiver.
-    BufferOnDetach,
-};
 
 /// What a worker is told about the drain of one of its local queries.
 struct DrainConfiguration
@@ -51,15 +37,6 @@ struct DrainConfiguration
     std::unordered_map<std::string, SinkDrainMode> sinkModes;
 
     bool operator==(const DrainConfiguration&) const = default;
-};
-
-/// The receiver a network sink in `SinkDrainMode::BufferOnDetach` is redirected to.
-struct RedirectTarget
-{
-    std::string connection;
-    std::string channel;
-
-    bool operator==(const RedirectTarget&) const = default;
 };
 
 /// The drain state of one local query. The worker writes it when it is told about a drain, the query's pipelines read it through the
@@ -111,10 +88,4 @@ private:
     folly::Synchronized<Internal> internal;
 };
 
-std::ostream& operator<<(std::ostream& os, SinkDrainMode mode);
-std::ostream& operator<<(std::ostream& os, const RedirectTarget& target);
-
 }
-
-FMT_OSTREAM(NES::SinkDrainMode);
-FMT_OSTREAM(NES::RedirectTarget);

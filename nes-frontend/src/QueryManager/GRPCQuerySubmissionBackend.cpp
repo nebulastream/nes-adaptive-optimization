@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
@@ -33,15 +34,57 @@
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/support/status.h>
 #include <magic_enum/magic_enum.hpp>
+#include <DrainRequest.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
 #include <SingleNodeWorkerRPCService.grpc.pb.h>
 #include <SingleNodeWorkerRPCService.pb.h>
+#include <SinkDrain.hpp>
 #include <WorkerStatus.hpp>
 
 namespace NES
 {
+namespace
+{
+/// Restores the exception the worker failed with from the trailing metadata of the call, see `handleError` in the GrpcService.
+Exception exceptionFromStatus(const grpc::ClientContext& context, const grpc::Status& status, const std::string_view call)
+{
+    const auto& metadata = context.GetServerTrailingMetadata();
+    if (const auto code = metadata.find("code"); code != metadata.end())
+    {
+        try
+        {
+            return Exception(std::string(status.error_message()), std::stoull(std::string(code->second.data(), code->second.size())));
+        }
+        catch (const std::exception&)
+        {
+            /// Fall through to the generic error below.
+        }
+    }
+    return UnknownException(
+        "{} failed.\nStatus: {}\nMessage: {}\nDetail: {}",
+        call,
+        magic_enum::enum_name(status.error_code()),
+        status.error_message(),
+        status.error_details());
+}
+
+::SinkDrainMode serializeSinkDrainMode(const NES::SinkDrainMode mode)
+{
+    switch (mode)
+    {
+        case NES::SinkDrainMode::ForwardMarker:
+            return ::SinkForwardMarker;
+        case NES::SinkDrainMode::Detach:
+            return ::SinkDetach;
+        case NES::SinkDrainMode::BufferOnDetach:
+            return ::SinkBufferOnDetach;
+    }
+    std::unreachable();
+}
+}
+
 GRPCQuerySubmissionBackend::GRPCQuerySubmissionBackend(WorkerConfig config)
     : stub{WorkerRPCService::NewStub(grpc::CreateChannel(config.host.getRawValue(), grpc::InsecureChannelCredentials()))}
     , workerConfig{std::move(config)}
@@ -186,6 +229,64 @@ std::expected<void, Exception> GRPCQuerySubmissionBackend::stop(QueryId queryId)
 
     return std::unexpected{NES::QueryStopFailed(
         "Status: {}\nMessage: {}\nDetail: {}", magic_enum::enum_name(status.error_code()), status.error_message(), status.error_details())};
+}
+
+std::expected<void, Exception> GRPCQuerySubmissionBackend::drain(QueryId queryId, const DrainRequest& drainRequest)
+{
+    grpc::ClientContext context;
+    DrainQueryRequest request;
+    *request.mutable_queryid() = QueryPlanSerializationUtil::serializeQueryId(queryId);
+    request.set_drainid(drainRequest.drainId.getRawValue());
+    request.set_drainsquery(drainRequest.drainsQuery);
+    request.set_stoplocalsources(drainRequest.stopLocalSources);
+    for (const auto& channel : drainRequest.markerChannels)
+    {
+        request.add_markerchannels(channel);
+    }
+    for (const auto& [channel, mode] : drainRequest.sinkModes)
+    {
+        (*request.mutable_sinkmodes())[channel] = serializeSinkDrainMode(mode);
+    }
+    google::protobuf::Empty response;
+    if (const auto status = stub->DrainQuery(&context, request, &response); !status.ok())
+    {
+        return std::unexpected{exceptionFromStatus(context, status, "DrainQuery")};
+    }
+    NES_DEBUG("Configured drain {} of query {} on node {}.", drainRequest.drainId, queryId, workerConfig.host);
+    return {};
+}
+
+std::expected<void, Exception> GRPCQuerySubmissionBackend::startDrain(QueryId queryId, const DrainId drainId)
+{
+    grpc::ClientContext context;
+    StartDrainRequest request;
+    *request.mutable_queryid() = QueryPlanSerializationUtil::serializeQueryId(queryId);
+    request.set_drainid(drainId.getRawValue());
+    google::protobuf::Empty response;
+    if (const auto status = stub->StartDrain(&context, request, &response); !status.ok())
+    {
+        return std::unexpected{exceptionFromStatus(context, status, "StartDrain")};
+    }
+    NES_DEBUG("Started drain {} of query {} on node {}.", drainId, queryId, workerConfig.host);
+    return {};
+}
+
+std::expected<void, Exception>
+GRPCQuerySubmissionBackend::redirectSink(QueryId queryId, const std::string& channel, const RedirectTarget& target)
+{
+    grpc::ClientContext context;
+    RedirectSinkRequest request;
+    *request.mutable_queryid() = QueryPlanSerializationUtil::serializeQueryId(queryId);
+    request.set_channel(channel);
+    request.set_connection(target.connection);
+    request.set_newchannel(target.channel);
+    google::protobuf::Empty response;
+    if (const auto status = stub->RedirectSink(&context, request, &response); !status.ok())
+    {
+        return std::unexpected{exceptionFromStatus(context, status, "RedirectSink")};
+    }
+    NES_DEBUG("Redirected sink {} of query {} on node {} to {}.", channel, queryId, workerConfig.host, target);
+    return {};
 }
 
 BackendProvider createGRPCBackend()

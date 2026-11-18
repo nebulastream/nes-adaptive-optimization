@@ -24,11 +24,13 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
 #include <Plans/LogicalPlan.hpp>
+#include <QueryManager/DrainPlanner.hpp>
 #include <Runtime/Execution/QueryStatus.hpp>
 #include <Util/Logger/Logger.hpp>
 #include <Util/Pointers.hpp>
@@ -36,6 +38,7 @@
 #include <fmt/ranges.h>
 #include <DistributedLogicalPlan.hpp>
 #include <DistributedQuery.hpp>
+#include <DrainRequest.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
@@ -112,6 +115,7 @@ void QueryManager::QueryManagerBackends::rebuildBackendsIfNeeded() const
 [[nodiscard]] std::expected<DistributedQueryId, std::vector<Exception>> QueryManager::start(const DistributedLogicalPlan& plan)
 {
     std::unordered_map<Host, std::vector<QueryId>> localQueries;
+    std::unordered_map<LocalQueryRef, LogicalPlan> startedPlans;
 
     auto id = plan.getQueryId();
     if (id == DistributedQueryId(DistributedQueryId::INVALID))
@@ -141,6 +145,7 @@ void QueryManager::QueryManagerBackends::rebuildBackendsIfNeeded() const
                 {
                     NES_DEBUG("Starting query on node {} was successful.", host);
                     localQueries[host].emplace_back(*result);
+                    startedPlans.emplace(LocalQueryRef{.host = host, .queryId = *result}, localPlan);
                     continue;
                 }
                 exceptions.emplace_back(result.error());
@@ -181,6 +186,7 @@ void QueryManager::QueryManagerBackends::rebuildBackendsIfNeeded() const
     }
 
     this->state.queries.emplace(id, std::move(localQueries));
+    this->state.localPlans.merge(startedPlans);
 
     /// Poll until all local queries have advanced past Registered, so the caller can immediately
     /// observe a meaningful status after this function returns.
@@ -354,6 +360,100 @@ std::expected<void, std::vector<Exception>> QueryManager::stop(const Distributed
     NES_DEBUG("Stopping query {} was successful.", queryId);
     /// Stopped queries stay registered so that their terminal status can still be queried.
     return {};
+}
+
+std::expected<DrainId, std::vector<Exception>>
+QueryManager::drain(const DistributedQueryId& queryId, const std::unordered_set<LocalQueryRef>& drained)
+{
+    auto queryResult = getQuery(queryId);
+    if (!queryResult.has_value())
+    {
+        return std::unexpected(std::vector{queryResult.error()});
+    }
+
+    std::unordered_map<LocalQueryRef, LogicalPlan> localPlans;
+    for (const auto& [host, localQueryId] : queryResult->iterate())
+    {
+        const LocalQueryRef ref{.host = host, .queryId = localQueryId};
+        const auto plan = state.localPlans.find(ref);
+        if (plan == state.localPlans.end())
+        {
+            return std::unexpected(
+                std::vector<Exception>{InvalidDrain(
+                    "the plan of the local query {} on {} is unknown, as it was not started by this QueryManager", localQueryId, host)});
+        }
+        localPlans.emplace(ref, plan->second);
+    }
+
+    const auto drainId = nextDrainId;
+    std::optional<DrainPlan> plan;
+    CPPTRACE_TRY
+    {
+        plan = planDrain(drainId, localPlans, drained);
+    }
+    CPPTRACE_CATCH(const Exception& exception)
+    {
+        return std::unexpected(std::vector{exception});
+    }
+    nextDrainId = DrainId(nextDrainId.getRawValue() + 1);
+
+    /// Phase 1: every local query which takes part in the drain has to accept it before any of them starts, so that a drain marker
+    /// never arrives at a query which does not expect it.
+    std::vector<Exception> exceptions;
+    for (const auto& [ref, request] : plan->requests)
+    {
+        if (auto result = backends.at(ref.host).drain(ref.queryId, request); !result)
+        {
+            exceptions.push_back(std::move(result.error()));
+        }
+    }
+    if (!exceptions.empty())
+    {
+        cancelDrain(drained);
+        return std::unexpected(std::move(exceptions));
+    }
+
+    /// Phase 2
+    for (const auto& ref : plan->starts)
+    {
+        if (auto result = backends.at(ref.host).startDrain(ref.queryId, drainId); !result)
+        {
+            exceptions.push_back(std::move(result.error()));
+        }
+    }
+    if (!exceptions.empty())
+    {
+        cancelDrain(drained);
+        return std::unexpected(std::move(exceptions));
+    }
+    NES_DEBUG("Started drain {} of query {}.", drainId, queryId);
+    return drainId;
+}
+
+void QueryManager::cancelDrain(const std::unordered_set<LocalQueryRef>& drained)
+{
+    for (const auto& ref : drained)
+    {
+        if (const auto result = backends.at(ref.host).stop(ref.queryId); !result)
+        {
+            NES_WARNING("Could not stop local query {} on {} while cancelling a drain: {}", ref.queryId, ref.host, result.error());
+        }
+    }
+}
+
+std::expected<void, Exception> QueryManager::redirectSink(
+    const LocalQueryRef& sink, const std::string& sinkChannel, const LocalQueryRef& target, const std::string& targetChannel)
+{
+    CPPTRACE_TRY
+    {
+        const auto redirectTarget = planRedirect(state.localPlans, sink, sinkChannel, target, targetChannel);
+        return backends.at(sink.host).redirectSink(sink.queryId, sinkChannel, redirectTarget);
+    }
+    CPPTRACE_CATCH(const Exception& exception)
+    {
+        return std::unexpected(exception);
+    }
+    std::unreachable();
 }
 
 }

@@ -92,7 +92,8 @@ TEST_F(QueryDrainTrackerTest, configuresTheDrainAndResolvesTheMarkerChannels)
     tracker.configureDrain(QUERY, startHere());
     EXPECT_EQ(
         drainState->getConfiguration(),
-        (DrainConfiguration{.drainId = DRAIN, .drainsQuery = true, .stopLocalSources = true, .sinkModes = {{"downstream", SinkDrainMode::Detach}}}));
+        (DrainConfiguration{
+            .drainId = DRAIN, .drainsQuery = true, .stopLocalSources = true, .sinkModes = {{"downstream", SinkDrainMode::Detach}}}));
     EXPECT_EQ(tracker.sourcesEndingWithMarker(QUERY, DRAIN), (std::unordered_set{OriginId(2)}));
 }
 
@@ -172,9 +173,7 @@ TEST_F(QueryDrainTrackerTest, aQueryWhoseSourcesAllEndWithAMarkerNeedNotStopItsS
     QueryDrainTracker networkOnly;
     const auto otherState = std::make_shared<DrainState>();
     networkOnly.registerQuery(
-        QUERY,
-        QueryChannels{.networkSources = channels().networkSources, .networkSinks = {}, .numberOfSources = 2},
-        otherState);
+        QUERY, QueryChannels{.networkSources = channels().networkSources, .networkSinks = {}, .numberOfSources = 2}, otherState);
     networkOnly.configureDrain(QUERY, downstream);
     EXPECT_TRUE(otherState->getConfiguration().has_value());
     /// The drain does not start there

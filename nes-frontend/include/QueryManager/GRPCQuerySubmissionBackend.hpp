@@ -18,13 +18,16 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
 #include <Plans/LogicalPlan.hpp>
+#include <DrainRequest.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
 #include <SingleNodeWorkerRPCService.grpc.pb.h>
+#include <SinkDrain.hpp>
 #include <Version.hpp>
 #include <WorkerStatus.hpp>
 
@@ -42,6 +45,9 @@ public:
     [[nodiscard]] std::expected<LocalQueryStatusSnapshot, Exception> status(QueryId) const override;
     [[nodiscard]] std::expected<WorkerStatus, Exception> workerStatus(std::chrono::system_clock::time_point after) const override;
     [[nodiscard]] std::expected<VersionInfo, Exception> version() const override;
+    std::expected<void, Exception> drain(QueryId, const DrainRequest&) override;
+    std::expected<void, Exception> startDrain(QueryId, DrainId) override;
+    std::expected<void, Exception> redirectSink(QueryId, const std::string& channel, const RedirectTarget&) override;
 };
 
 BackendProvider createGRPCBackend();

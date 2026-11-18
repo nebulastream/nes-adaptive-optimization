@@ -73,7 +73,8 @@ void validate(const QueryId& queryId, const QueryChannels& channels, const Drain
         {
             if (mode != SinkDrainMode::BufferOnDetach)
             {
-                throw InvalidDrainRequest("query {} is not drained, so its sink {} cannot end its channel in mode {}", queryId, channel, mode);
+                throw InvalidDrainRequest(
+                    "query {} is not drained, so its sink {} cannot end its channel in mode {}", queryId, channel, mode);
             }
         }
         return;
@@ -101,8 +102,8 @@ void QueryDrainTracker::registerQuery(const QueryId& queryId, QueryChannels chan
 {
     PRECONDITION(drainState != nullptr, "A query requires a drain state");
     const auto locked = entries.wlock();
-    const auto [it, inserted]
-        = locked->try_emplace(queryId, DrainEntry{.channels = std::move(channels), .drainState = std::move(drainState), .sourcesEndingWithMarker = {}});
+    const auto [it, inserted] = locked->try_emplace(
+        queryId, DrainEntry{.channels = std::move(channels), .drainState = std::move(drainState), .sourcesEndingWithMarker = {}});
     INVARIANT(inserted, "Query {} is registered twice", queryId);
 }
 
@@ -117,11 +118,12 @@ void QueryDrainTracker::configureDrain(const QueryId& queryId, const DrainReques
     auto& entry = it->second;
     validate(queryId, entry.channels, request);
 
-    if (!entry.drainState->configure(DrainConfiguration{
-            .drainId = request.drainId,
-            .drainsQuery = request.drainsQuery,
-            .stopLocalSources = request.stopLocalSources,
-            .sinkModes = request.sinkModes}))
+    if (!entry.drainState->configure(
+            DrainConfiguration{
+                .drainId = request.drainId,
+                .drainsQuery = request.drainsQuery,
+                .stopLocalSources = request.stopLocalSources,
+                .sinkModes = request.sinkModes}))
     {
         throw InvalidDrainRequest("query {} is already being drained", queryId);
     }

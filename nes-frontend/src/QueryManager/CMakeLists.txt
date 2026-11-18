@@ -11,6 +11,7 @@
 # limitations under the License.
 
 add_source_files(nes-query-manager-grpc
+        DrainPlanner.cpp
         GRPCQuerySubmissionBackend.cpp
         QueryManager.cpp
 )

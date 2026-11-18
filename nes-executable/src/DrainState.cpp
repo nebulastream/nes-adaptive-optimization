@@ -15,13 +15,11 @@
 #include <DrainState.hpp>
 
 #include <optional>
-#include <ostream>
 #include <string>
 #include <utility>
 #include <Identifiers/Identifiers.hpp>
 #include <Identifiers/NESStrongTypeFormat.hpp>
 #include <fmt/format.h>
-#include <magic_enum/magic_enum.hpp>
 #include <ErrorHandling.hpp>
 
 namespace NES
@@ -111,16 +109,6 @@ std::optional<std::string> DrainState::findIncompleteDrain(const Internal& inter
         }
     }
     return std::nullopt;
-}
-
-std::ostream& operator<<(std::ostream& os, const SinkDrainMode mode)
-{
-    return os << magic_enum::enum_name(mode);
-}
-
-std::ostream& operator<<(std::ostream& os, const RedirectTarget& target)
-{
-    return os << target.connection << "/" << target.channel;
 }
 
 }

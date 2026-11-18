@@ -19,9 +19,9 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 #include <Identifiers/Identifiers.hpp>
 #include <folly/Synchronized.h>
+#include <DrainRequest.hpp>
 #include <DrainState.hpp>
 #include <QueryId.hpp>
 
@@ -37,17 +37,6 @@ struct QueryChannels
     std::unordered_set<std::string> networkSinks;
     /// The number of sources of the query, including the network sources.
     size_t numberOfSources = 0;
-};
-
-/// What the coordinator tells a worker about the drain of one of its local queries.
-struct DrainRequest
-{
-    DrainId drainId = INVALID_DRAIN_ID;
-    bool drainsQuery = false;
-    bool stopLocalSources = false;
-    /// The channel ids of the network sources which end with a marker from a drained upstream query.
-    std::vector<std::string> markerChannels;
-    std::unordered_map<std::string, SinkDrainMode> sinkModes;
 };
 
 /// Keeps the drain state and the network channels of the local queries of a worker, and checks the drain requests against them.

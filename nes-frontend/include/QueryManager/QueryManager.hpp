@@ -18,18 +18,23 @@
 #include <cstdint>
 #include <expected>
 #include <map>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/QueryLog.hpp>
 #include <Plans/LogicalPlan.hpp>
+#include <QueryManager/DrainPlanner.hpp>
 #include <Util/Pointers.hpp>
 #include <absl/functional/any_invocable.h>
 #include <DistributedLogicalPlan.hpp>
 #include <DistributedQuery.hpp>
+#include <DrainRequest.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
+#include <SinkDrain.hpp>
 #include <Version.hpp>
 #include <WorkerCatalog.hpp>
 #include <WorkerConfig.hpp>
@@ -47,6 +52,12 @@ public:
     [[nodiscard]] virtual std::expected<LocalQueryStatusSnapshot, Exception> status(QueryId) const = 0;
     [[nodiscard]] virtual std::expected<WorkerStatus, Exception> workerStatus(std::chrono::system_clock::time_point after) const = 0;
     [[nodiscard]] virtual std::expected<VersionInfo, Exception> version() const = 0;
+    /// Configures the drain of a local query (phase 1 of a drain).
+    virtual std::expected<void, Exception> drain(QueryId, const DrainRequest&) = 0;
+    /// Starts the configured drain of a local query (phase 2 of a drain).
+    virtual std::expected<void, Exception> startDrain(QueryId, DrainId) = 0;
+    /// Redirects the network sink with the given channel id of a local query, which buffers since its receiver was drained.
+    virtual std::expected<void, Exception> redirectSink(QueryId, const std::string& channel, const RedirectTarget&) = 0;
 };
 
 /// std::move_only_function is the C++23 equivalent but is not yet available in libc++19.
@@ -55,6 +66,9 @@ using BackendProvider = absl::AnyInvocable<UniquePtr<QuerySubmissionBackend>(con
 struct QueryManagerState
 {
     std::unordered_map<DistributedQueryId, DistributedQuery> queries;
+    /// The plans the local queries were started with, which a drain is worked out from. Queries which were started by another
+    /// QueryManager, e.g. restored from a saved state, have none and cannot be drained.
+    std::unordered_map<LocalQueryRef, LogicalPlan> localPlans;
 };
 
 /// Manages the lifecycle of distributed queries in a NebulaStream cluster.
@@ -106,6 +120,10 @@ class QueryManager
 
     QueryManagerState state;
     QueryManagerBackends backends;
+    DrainId nextDrainId = INITIAL_DRAIN_ID;
+
+    /// Stops the given local queries to cancel a drain which could not start.
+    void cancelDrain(const std::unordered_set<LocalQueryRef>& drained);
 
 public:
     QueryManager(SharedPtr<WorkerCatalog> workerCatalog, BackendProvider provider, QueryManagerState state);
@@ -119,6 +137,18 @@ public:
     [[nodiscard]] std::expected<DistributedWorkerStatus, Exception> workerStatus(std::chrono::system_clock::time_point after) const;
     [[nodiscard]] std::map<Host, std::expected<VersionInfo, Exception>> workerVersions() const;
     [[nodiscard]] std::expected<DistributedQuery, Exception> getQuery(const DistributedQueryId& query) const;
+
+    /// Drains the given local queries of the distributed query: configures every local query which takes part in the drain, and
+    /// starts the drain once all of them have accepted. If one of them rejects the drain, the drained local queries are stopped.
+    /// Returns once the drain has started; the drained local queries report Drained (see `status`) once their data has drained.
+    [[nodiscard]] std::expected<DrainId, std::vector<Exception>>
+    drain(const DistributedQueryId& query, const std::unordered_set<LocalQueryRef>& drained);
+
+    /// Redirects the network sink with the channel id `sinkChannel` of the local query `sink`, which buffers since its receiver was
+    /// drained, to the network source with the channel id `targetChannel` of the local query `target`. Both have to be local queries
+    /// started by this QueryManager.
+    std::expected<void, Exception>
+    redirectSink(const LocalQueryRef& sink, const std::string& sinkChannel, const LocalQueryRef& target, const std::string& targetChannel);
 };
 
 }

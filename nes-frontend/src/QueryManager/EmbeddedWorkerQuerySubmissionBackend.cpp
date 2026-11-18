@@ -27,11 +27,13 @@
 #include <Util/Logger/Logger.hpp>
 #include <Util/Overloaded.hpp>
 #include <folly/concurrency/UnboundedQueue.h>
+#include <DrainRequest.hpp>
 #include <ErrorHandling.hpp>
 #include <QueryId.hpp>
 #include <QueryStatus.hpp>
 #include <SingleNodeWorker.hpp>
 #include <SingleNodeWorkerConfiguration.hpp>
+#include <SinkDrain.hpp>
 #include <Thread.hpp>
 #include <Version.hpp>
 #include <WorkerConfig.hpp>
@@ -65,6 +67,25 @@ struct WorkerStatusQuery
     std::chrono::system_clock::time_point after;
 };
 
+struct DrainQuery
+{
+    QueryId id;
+    DrainRequest request;
+};
+
+struct StartDrain
+{
+    QueryId id;
+    DrainId drainId;
+};
+
+struct RedirectSink
+{
+    QueryId id;
+    std::string channel;
+    RedirectTarget target;
+};
+
 struct StartQueryReply
 {
     std::expected<QueryId, Exception> reply;
@@ -85,10 +106,15 @@ struct WorkerStatusReply
     std::expected<WorkerStatus, Exception> reply;
 };
 
-using Request = std::variant<Stop, StartQuery, StopQuery, QueryStatusQuery, WorkerStatusQuery>;
+struct DrainReply
+{
+    std::expected<void, Exception> reply;
+};
+
+using Request = std::variant<Stop, StartQuery, StopQuery, QueryStatusQuery, WorkerStatusQuery, DrainQuery, StartDrain, RedirectSink>;
 /// `std::monostate` first so the variant is default-constructible — needed because
 /// folly's `dequeue(T&)` writes into an existing slot. It is never actually pushed.
-using Reply = std::variant<std::monostate, StartQueryReply, StopQueryReply, QueryStatusReply, WorkerStatusReply>;
+using Reply = std::variant<std::monostate, StartQueryReply, StopQueryReply, QueryStatusReply, WorkerStatusReply, DrainReply>;
 }
 
 /// All shared state between callers and the single worker thread lives here:
@@ -128,6 +154,21 @@ public:
         return submit<WorkerStatusReply>(WorkerStatusQuery{.after = after});
     }
 
+    std::expected<void, Exception> drain(QueryId id, DrainRequest request)
+    {
+        return submit<DrainReply>(DrainQuery{.id = std::move(id), .request = std::move(request)});
+    }
+
+    std::expected<void, Exception> startDrain(QueryId id, const DrainId drainId)
+    {
+        return submit<DrainReply>(StartDrain{.id = std::move(id), .drainId = drainId});
+    }
+
+    std::expected<void, Exception> redirectSink(QueryId id, std::string channel, RedirectTarget target)
+    {
+        return submit<DrainReply>(RedirectSink{.id = std::move(id), .channel = std::move(channel), .target = std::move(target)});
+    }
+
 private:
     static void runWorker(
         const std::stop_token& stopToken,
@@ -162,6 +203,10 @@ private:
                     [&](const QueryStatusQuery& request) -> Reply { return QueryStatusReply{.reply = worker.getQueryStatus(request.id)}; },
                     [&](const WorkerStatusQuery& request) -> Reply
                     { return WorkerStatusReply{.reply = worker.getWorkerStatus(request.after)}; },
+                    [&](const DrainQuery& request) -> Reply { return DrainReply{.reply = worker.drainQuery(request.id, request.request)}; },
+                    [&](const StartDrain& request) -> Reply { return DrainReply{.reply = worker.startDrain(request.id, request.drainId)}; },
+                    [&](RedirectSink& request) -> Reply
+                    { return DrainReply{.reply = worker.redirectSink(request.id, request.channel, std::move(request.target))}; },
                 },
                 request);
             replies.enqueue(std::move(reply));
@@ -229,6 +274,22 @@ std::expected<WorkerStatus, Exception> EmbeddedWorkerQuerySubmissionBackend::wor
 std::expected<VersionInfo, Exception> EmbeddedWorkerQuerySubmissionBackend::version() const
 {
     return versionInfo(SingleNodeWorkerBinaryName);
+}
+
+std::expected<void, Exception> EmbeddedWorkerQuerySubmissionBackend::drain(QueryId queryId, const DrainRequest& request)
+{
+    return channel->drain(queryId, request);
+}
+
+std::expected<void, Exception> EmbeddedWorkerQuerySubmissionBackend::startDrain(QueryId queryId, const DrainId drainId)
+{
+    return channel->startDrain(queryId, drainId);
+}
+
+std::expected<void, Exception>
+EmbeddedWorkerQuerySubmissionBackend::redirectSink(QueryId queryId, const std::string& sinkChannel, const RedirectTarget& target)
+{
+    return channel->redirectSink(queryId, sinkChannel, target);
 }
 
 BackendProvider createEmbeddedBackend(WorkerConfigResolver resolveWorkerConfiguration)
