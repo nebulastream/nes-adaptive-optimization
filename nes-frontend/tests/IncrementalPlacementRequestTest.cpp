@@ -1,0 +1,542 @@
+/*
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        https://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
+/// Runs ISQP/ISQD end to end with embedded workers that communicate over the in-memory transport: a query runs on a leaf, a base station
+/// and the cloud while the leaf moves to another base station. The query must deliver every tuple exactly once.
+
+#include <QueryManager/IncrementalPlacementRequest.hpp>
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <ranges>
+#include <set>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+#include <Configurations/Util.hpp>
+#include <DataTypes/DataType.hpp>
+#include <DataTypes/UnboundField.hpp>
+#include <Identifiers/Identifier.hpp>
+#include <Identifiers/Identifiers.hpp>
+#include <Placement/QueryDecomposition.hpp>
+#include <QueryManager/EmbeddedWorkerQuerySubmissionBackend.hpp>
+#include <QueryManager/QueryManager.hpp>
+#include <SQLQueryParser/AntlrSQLQueryParser.hpp>
+#include <SQLQueryParser/StatementBinder.hpp>
+#include <Schema/Schema.hpp>
+#include <Sinks/SinkCatalog.hpp>
+#include <Sources/SourceCatalog.hpp>
+#include <Statements/StatementHandler.hpp>
+#include <Util/Logger/LogLevel.hpp>
+#include <Util/Logger/Logger.hpp>
+#include <Util/Pointers.hpp>
+#include <Util/UUID.hpp>
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include <nes-network-bindings/lib.h>
+#include <BaseUnitTest.hpp>
+#include <DistributedQuery.hpp>
+#include <ModelCatalog.hpp>
+#include <PlacementAmendmentMode.hpp>
+#include <QueryOptimizer.hpp>
+#include <QueryOptimizerConfiguration.hpp>
+#include <TopologyChangeEvent.hpp>
+#include <WorkerCatalog.hpp>
+#include <WorkerConfig.hpp>
+#include <WorkerOptimizerConfig.hpp>
+
+namespace NES
+{
+
+class IncrementalPlacementRequestTest : public Testing::BaseUnitTest
+{
+public:
+    static void SetUpTestSuite()
+    {
+        Logger::setupLogging("IncrementalPlacementRequestTest.log", LogLevel::LOG_DEBUG);
+        enable_memcom();
+    }
+
+    void SetUp() override
+    {
+        BaseUnitTest::SetUp();
+        outputFile = std::filesystem::temp_directory_path() / ("isqd-" + UUIDToString(generateUUID()) + ".csv");
+    }
+
+    void TearDown() override
+    {
+        std::filesystem::remove(outputFile);
+        BaseUnitTest::TearDown();
+    }
+
+    /// leaf ---> base1 ---> cloud
+    ///           base2 ---/
+    /// Worker names get a per-test suffix, as the in-memory transport is process-wide.
+    void setUpCluster(const std::string& suffix, const size_t baseCapacity)
+    {
+        prefix = suffix;
+        const auto add = [&](const std::string& name, const Capacity capacity, const std::vector<Host>& downstream)
+        { workerCatalog->addWorker(host(name), name + suffix + ":9090", capacity, downstream); };
+        add("cloud", CapacityKind::Unlimited{}, {});
+        add("base1", CapacityKind::Limited{baseCapacity}, {host("cloud")});
+        add("base2", CapacityKind::Limited{baseCapacity}, {host("cloud")});
+        add("leaf", CapacityKind::Limited{0}, {host("base1")});
+
+        const Schema<UnqualifiedUnboundField, Ordered> schema{UnqualifiedUnboundField{Identifier::parse("id"), DataType::Type::UINT64}};
+        const auto logicalSource = sourceCatalog->addLogicalSource(Identifier::parse("stream"), schema);
+        ASSERT_TRUE(logicalSource.has_value());
+        ASSERT_TRUE(sourceCatalog
+                        ->addPhysicalSource(
+                            *logicalSource,
+                            Identifier::parse("Generator"),
+                            host("leaf"),
+                            {{Identifier::parse("stop_generator_when_sequence_finishes"), "ALL"},
+                             {Identifier::parse("seed"), "1"},
+                             {Identifier::parse("generator_rate_type"), "FIXED"},
+                             {Identifier::parse("generator_rate_config"), "emit_rate 2000"},
+                             {Identifier::parse("generator_schema"), fmt::format("SEQUENCE UINT64 0 {} 1", NUMBER_OF_TUPLES)}},
+                            {{Identifier::parse("type"), "CSV"}})
+                        .has_value());
+        ASSERT_TRUE(sinkCatalog
+                        ->addSinkDescriptor(
+                            Identifier::parse("snk"),
+                            schema,
+                            Identifier::parse("File"),
+                            host("cloud"),
+                            {{Identifier::parse("FILE_PATH"), outputFile.string()}, {Identifier::parse("OUTPUT_FORMAT"), "CSV"}},
+                            {})
+                        .has_value());
+    }
+
+    [[nodiscard]] Host host(const std::string& name) const { return Host(name + prefix + ":8080"); }
+
+    std::shared_ptr<QueryManager> createQueryManager()
+    {
+        auto resolveWorker = [](const WorkerConfig&) { return defaultConfiguration<WorkerOptimizerConfig>().worker; };
+        return std::make_shared<QueryManager>(copyPtr(workerCatalog), createEmbeddedBackend(std::move(resolveWorker)));
+    }
+
+    DistributedQueryId startQuery(
+        QueryManager& queryManager,
+        const std::string& sql,
+        const StreamJoinStrategy joinStrategy = defaultConfiguration<QueryOptimizerConfiguration>().joinStrategy)
+    {
+        auto configuration = defaultConfiguration<QueryOptimizerConfiguration>();
+        configuration.joinStrategy = joinStrategy;
+        const QueryOptimizer optimizer(configuration, copyPtr(sourceCatalog), copyPtr(sinkCatalog), copyPtr(workerCatalog), modelCatalog);
+        auto started = queryManager.start(optimizer.optimize(AntlrSQLQueryParser::createLogicalQueryPlanFromSQLString(sql)));
+        EXPECT_TRUE(started.has_value());
+        return started.value_or(DistributedQueryId(DistributedQueryId::INVALID));
+    }
+
+    IncrementalPlacementResult moveLeafToBase2(QueryManager& queryManager, const bool incremental)
+    {
+        IncrementalPlacementRequest request(
+            queryManager,
+            copyPtr(workerCatalog),
+            QueryDecomposer(copyPtr(workerCatalog), copyPtr(sourceCatalog), copyPtr(sinkCatalog)),
+            defaultConfiguration<QueryOptimizerConfiguration>().network,
+            IncrementalPlacementConfiguration{.enableIncrementalPlacement = incremental, .drainTimeout = std::chrono::seconds(30)});
+        return request.execute(
+            {RemoveLinkEvent{.upstream = host("leaf"), .downstream = host("base1")},
+             AddLinkEvent{.upstream = host("leaf"), .downstream = host("base2")}});
+    }
+
+    static void waitForStop(QueryManager& queryManager, const DistributedQueryId& queryId)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const auto status = queryManager.status(queryId);
+            ASSERT_TRUE(status.has_value());
+            const auto global = status->getGlobalQueryStatus();
+            ASSERT_NE(global, DistributedQueryStatus::Failed);
+            if (global == DistributedQueryStatus::Stopped)
+            {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        FAIL() << "Query did not stop in time";
+    }
+
+    /// Every tuple of the generator must be in the output exactly once.
+    void expectEveryTupleExactlyOnce() const
+    {
+        std::ifstream file(outputFile);
+        std::string line;
+        std::multiset<uint64_t> ids;
+        while (std::getline(file, line))
+        {
+            if (line.empty() or not std::isdigit(static_cast<unsigned char>(line.front())))
+            {
+                continue;
+            }
+            ids.insert(std::stoull(line));
+        }
+        ASSERT_FALSE(ids.empty());
+        const std::set<uint64_t> distinct(ids.begin(), ids.end());
+        EXPECT_EQ(distinct.size(), ids.size()) << "duplicates in the output";
+        EXPECT_EQ(*distinct.begin(), 0U);
+        EXPECT_EQ(*distinct.rbegin() + 1, distinct.size()) << "missing tuples in the output";
+        EXPECT_GE(distinct.size(), NUMBER_OF_TUPLES);
+    }
+
+    static std::vector<uint64_t> missingIds(const std::set<uint64_t>& ids, const uint64_t maxId)
+    {
+        return std::views::iota(uint64_t{0}, maxId + 1) | std::views::filter([&](const auto id) { return not ids.contains(id); })
+            | std::ranges::to<std::vector>();
+    }
+
+    static constexpr uint64_t NUMBER_OF_TUPLES = 4000;
+    std::string prefix;
+    std::filesystem::path outputFile;
+    SharedPtr<WorkerCatalog> workerCatalog = std::make_shared<WorkerCatalog>();
+    SharedPtr<SourceCatalog> sourceCatalog = std::make_shared<SourceCatalog>();
+    SharedPtr<SinkCatalog> sinkCatalog = std::make_shared<SinkCatalog>();
+    std::shared_ptr<ModelCatalog> modelCatalog = std::make_shared<ModelCatalog>();
+};
+
+/// Only the path changes: the forwarding plan on base1 is drained, the plan of the leaf is updated to send over base2, and the plan of
+/// the sink keeps running.
+TEST_F(IncrementalPlacementRequestTest, PathChange)
+{
+    setUpCluster("-path", 0);
+    const auto queryManager = createQueryManager();
+    const auto queryId = startQuery(*queryManager, "SELECT * FROM stream INTO snk");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    const auto result = moveLeafToBase2(*queryManager, true);
+    EXPECT_EQ(result.numberOfAffectedQueries, 1U);
+    EXPECT_EQ(result.numberOfFailedAmendments, 0U);
+    const auto plans = queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId);
+    EXPECT_EQ(queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId, host("base1")).size(), 0U);
+    EXPECT_EQ(queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId, host("base2")).size(), 1U);
+    EXPECT_EQ(plans.size(), 3U);
+
+    waitForStop(*queryManager, queryId);
+    expectEveryTupleExactlyOnce();
+}
+
+/// The selection on base1 is re-placed: its plan is drained and a new plan runs it on a worker reachable from the leaf.
+TEST_F(IncrementalPlacementRequestTest, OperatorReplacement)
+{
+    setUpCluster("-operator", 1);
+    const auto queryManager = createQueryManager();
+    const auto queryId = startQuery(*queryManager, "SELECT * FROM stream WHERE id >= 0 INTO snk");
+    ASSERT_EQ(queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId, host("base1")).size(), 1U);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    const auto result = moveLeafToBase2(*queryManager, true);
+    EXPECT_EQ(result.numberOfFailedAmendments, 0U);
+    EXPECT_EQ(queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId, host("base1")).size(), 0U);
+
+    waitForStop(*queryManager, queryId);
+    expectEveryTupleExactlyOnce();
+}
+
+/// As in the original (`getSharedQueryPlansToDeploy`), every query that is not deployed is amended by the next request, even if the
+/// request does not affect it: a query that an earlier amendment processed only partially (Updated), or whose amendment threw before its
+/// placement completed (Migrating). A query whose deployment failed (Failed) is not amended again.
+class PendingQueryTest : public IncrementalPlacementRequestTest, public ::testing::WithParamInterface<SharedQueryPlanStatus>
+{
+};
+
+TEST_P(PendingQueryTest, AmendsQueriesThatAreNotDeployed)
+{
+    const auto status = GetParam();
+    const bool amended = status != SharedQueryPlanStatus::Failed;
+    const std::string suffix = status == SharedQueryPlanStatus::Updated ? "-updated"
+        : status == SharedQueryPlanStatus::Migrating                    ? "-migrating"
+                                                                        : "-failed";
+    setUpCluster(suffix, 0);
+    const auto queryManager = createQueryManager();
+    const auto queryId = startQuery(*queryManager, "SELECT * FROM stream INTO snk");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    queryManager->getSharedQueryPlans().at(queryId).setStatus(status);
+
+    IncrementalPlacementRequest request(
+        *queryManager,
+        copyPtr(workerCatalog),
+        QueryDecomposer(copyPtr(workerCatalog), copyPtr(sourceCatalog), copyPtr(sinkCatalog)),
+        defaultConfiguration<QueryOptimizerConfiguration>().network,
+        IncrementalPlacementConfiguration{.enableIncrementalPlacement = true, .drainTimeout = std::chrono::seconds(30)});
+    const auto result = request.execute({AddNodeEvent{
+        .host = host("base3"),
+        .dataAddress = "base3" + suffix + ":9090",
+        .capacity = CapacityKind::Limited{0},
+        .downstream = {host("cloud")}}});
+    EXPECT_EQ(result.numberOfAffectedQueries, 0U);
+    EXPECT_EQ(result.numberOfPendingQueries, amended ? 1U : 0U);
+    ASSERT_EQ(result.amendments.size(), amended ? 1U : 0U);
+    if (amended)
+    {
+        EXPECT_TRUE(result.amendments.front().success);
+        EXPECT_FALSE(result.amendments.front().partiallyProcessed);
+    }
+    EXPECT_EQ(
+        queryManager->getSharedQueryPlans().at(queryId).getStatus(),
+        amended ? SharedQueryPlanStatus::Deployed : SharedQueryPlanStatus::Failed);
+
+    waitForStop(*queryManager, queryId);
+    expectEveryTupleExactlyOnce();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Statuses,
+    PendingQueryTest,
+    ::testing::Values(SharedQueryPlanStatus::Updated, SharedQueryPlanStatus::Migrating, SharedQueryPlanStatus::Failed));
+
+/// The statements of the REPL: link changes inside a topology change are applied together on COMMIT.
+TEST_F(IncrementalPlacementRequestTest, TopologyChangeStatements)
+{
+    setUpCluster("-statements", 0);
+    const auto queryManager = createQueryManager();
+    TopologyStatementHandler handler(
+        queryManager,
+        copyPtr(workerCatalog),
+        TopologyChangeConfiguration{
+            .sourceCatalog = copyPtr(sourceCatalog),
+            .sinkCatalog = copyPtr(sinkCatalog),
+            .network = defaultConfiguration<QueryOptimizerConfiguration>().network,
+            .placement = IncrementalPlacementConfiguration{.drainTimeout = std::chrono::seconds(30)}});
+    EXPECT_FALSE(handler(CommitTopologyChangeStatement{}).has_value()) << "COMMIT without BEGIN";
+
+    const auto queryId = startQuery(*queryManager, "SELECT * FROM stream INTO snk");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    ASSERT_TRUE(handler(BeginTopologyChangeStatement{}).has_value());
+    EXPECT_FALSE(handler(BeginTopologyChangeStatement{}).has_value()) << "nested topology change";
+    const auto dropped
+        = handler(AlterWorkerStatement{.host = host("leaf").getRawValue(), .downstream = host("base1").getRawValue(), .addLink = false});
+    ASSERT_TRUE(dropped.has_value());
+    EXPECT_TRUE(dropped->pending);
+    EXPECT_TRUE(workerCatalog->getTopology().hasLink(host("leaf"), host("base1"))) << "applied before COMMIT";
+    ASSERT_TRUE(
+        handler(AlterWorkerStatement{.host = host("leaf").getRawValue(), .downstream = host("base2").getRawValue(), .addLink = true})
+            .has_value());
+    const auto committed = handler(CommitTopologyChangeStatement{});
+    ASSERT_TRUE(committed.has_value()) << committed.error();
+    EXPECT_EQ(committed->numberOfChanges, 2U);
+    EXPECT_EQ(committed->numberOfAffectedQueries, 1U);
+    EXPECT_EQ(committed->numberOfFailedAmendments, 0U);
+    EXPECT_EQ(queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId, host("base2")).size(), 1U);
+
+    waitForStop(*queryManager, queryId);
+    expectEveryTupleExactlyOnce();
+
+    /// Outside of a topology change, a link change is applied right away.
+    const auto direct
+        = handler(AlterWorkerStatement{.host = host("leaf").getRawValue(), .downstream = host("base1").getRawValue(), .addLink = true});
+    ASSERT_TRUE(direct.has_value());
+    EXPECT_FALSE(direct->pending);
+    EXPECT_TRUE(workerCatalog->getTopology().hasLink(host("leaf"), host("base1")));
+}
+
+/// The join on base1 moves to the cloud when the leaf moves to base2. The old join is updated and drained: it sends its state to the new
+/// join, which restores it before it processes data. Every pair of matching tuples is in the output exactly once.
+TEST_F(IncrementalPlacementRequestTest, JoinStateMigration)
+{
+    setUpCluster("-join", 3);
+    workerCatalog->addWorker(host("leaf2"), "leaf2-join:9090", CapacityKind::Limited{0}, {host("base1")});
+    const Schema<UnqualifiedUnboundField, Ordered> schema{UnqualifiedUnboundField{Identifier::parse("id2"), DataType::Type::UINT64}};
+    const auto logicalSource = sourceCatalog->addLogicalSource(Identifier::parse("stream2"), schema);
+    ASSERT_TRUE(logicalSource.has_value());
+    ASSERT_TRUE(sourceCatalog
+                    ->addPhysicalSource(
+                        *logicalSource,
+                        Identifier::parse("Generator"),
+                        host("leaf2"),
+                        {{Identifier::parse("stop_generator_when_sequence_finishes"), "ALL"},
+                         {Identifier::parse("seed"), "1"},
+                         {Identifier::parse("generator_rate_type"), "FIXED"},
+                         {Identifier::parse("generator_rate_config"), "emit_rate 2000"},
+                         {Identifier::parse("generator_schema"), fmt::format("SEQUENCE UINT64 0 {} 1", NUMBER_OF_TUPLES)}},
+                        {{Identifier::parse("type"), "CSV"}})
+                    .has_value());
+    const Schema<UnqualifiedUnboundField, Ordered> joinSchema{
+        UnqualifiedUnboundField{Identifier::parse("start"), DataType::Type::UINT64},
+        UnqualifiedUnboundField{Identifier::parse("end"), DataType::Type::UINT64},
+        UnqualifiedUnboundField{Identifier::parse("id"), DataType::Type::UINT64},
+        UnqualifiedUnboundField{Identifier::parse("id2"), DataType::Type::UINT64}};
+    ASSERT_TRUE(sinkCatalog
+                    ->addSinkDescriptor(
+                        Identifier::parse("snkJoin"),
+                        joinSchema,
+                        Identifier::parse("File"),
+                        host("cloud"),
+                        {{Identifier::parse("FILE_PATH"), outputFile.string()}, {Identifier::parse("OUTPUT_FORMAT"), "CSV"}},
+                        {})
+                    .has_value());
+
+    const auto queryManager = createQueryManager();
+    const auto queryId = startQuery(
+        *queryManager,
+        "SELECT start, end, id, id2 FROM (SELECT * FROM (SELECT * FROM stream) INNER JOIN (SELECT * FROM stream2) ON id = id2 "
+        "WINDOW TUMBLING (id, id2, size 100 ms)) INTO snkJoin",
+        StreamJoinStrategy::NESTED_LOOP_JOIN);
+    ASSERT_EQ(queryManager->getGlobalExecutionPlan().getDecomposedQueryPlans(queryId, host("base1")).size(), 1U);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    const auto result = moveLeafToBase2(*queryManager, true);
+    EXPECT_EQ(result.numberOfFailedAmendments, 0U);
+
+    waitForStop(*queryManager, queryId);
+    /// The third column is the id of the left side; every id joins with exactly one tuple of the right side.
+    std::ifstream file(outputFile);
+    std::string line;
+    std::multiset<uint64_t> ids;
+    while (std::getline(file, line))
+    {
+        std::vector<uint64_t> values;
+        std::istringstream fields(line);
+        for (std::string field; std::getline(fields, field, ',');)
+        {
+            if (not field.empty() and std::isdigit(static_cast<unsigned char>(field.front())))
+            {
+                values.emplace_back(std::stoull(field));
+            }
+        }
+        if (values.size() == 4)
+        {
+            EXPECT_EQ(values[2], values[3]);
+            ids.insert(values[2]);
+        }
+    }
+    const std::set<uint64_t> distinct(ids.begin(), ids.end());
+    EXPECT_EQ(distinct.size(), ids.size()) << "duplicates in the output";
+    EXPECT_GE(distinct.size(), NUMBER_OF_TUPLES);
+    EXPECT_THAT(missingIds(distinct, *distinct.rbegin()), ::testing::IsEmpty());
+}
+
+/// Both inputs of a union move off base1: the union is re-placed in the cloud. Unlike the join, it has no state to migrate.
+TEST_F(IncrementalPlacementRequestTest, UnionReplacement)
+{
+    setUpCluster("-union", 3);
+    workerCatalog->addWorker(host("leaf2"), "leaf2-union:9090", CapacityKind::Limited{0}, {host("base1")});
+    const Schema<UnqualifiedUnboundField, Ordered> schema{UnqualifiedUnboundField{Identifier::parse("id"), DataType::Type::UINT64}};
+    const auto logicalSource = sourceCatalog->addLogicalSource(Identifier::parse("stream2"), schema);
+    ASSERT_TRUE(logicalSource.has_value());
+    ASSERT_TRUE(
+        sourceCatalog
+            ->addPhysicalSource(
+                *logicalSource,
+                Identifier::parse("Generator"),
+                host("leaf2"),
+                {{Identifier::parse("stop_generator_when_sequence_finishes"), "ALL"},
+                 {Identifier::parse("seed"), "1"},
+                 {Identifier::parse("generator_rate_type"), "FIXED"},
+                 {Identifier::parse("generator_rate_config"), "emit_rate 2000"},
+                 {Identifier::parse("generator_schema"), fmt::format("SEQUENCE UINT64 {} {} 1", NUMBER_OF_TUPLES, 2 * NUMBER_OF_TUPLES)}},
+                {{Identifier::parse("type"), "CSV"}})
+            .has_value());
+    const auto queryManager = createQueryManager();
+    const auto queryId = startQuery(*queryManager, "SELECT * FROM stream WHERE id >= 0 UNION SELECT * FROM stream2 WHERE id >= 0 INTO snk");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto result = moveLeafToBase2(*queryManager, true);
+    EXPECT_EQ(result.numberOfFailedAmendments, 0U);
+    waitForStop(*queryManager, queryId);
+    std::ifstream file(outputFile);
+    std::string line;
+    std::set<uint64_t> ids;
+    while (std::getline(file, line))
+    {
+        if (not line.empty() and std::isdigit(static_cast<unsigned char>(line.front())))
+        {
+            ids.insert(std::stoull(line));
+        }
+    }
+    EXPECT_THAT(missingIds(ids, (2 * NUMBER_OF_TUPLES) - 1), ::testing::IsEmpty());
+}
+
+/// Two queries on two leaves that move in the same batch are amended in parallel, synchronized optimistically or pessimistically.
+class ConcurrentIncrementalPlacementTest : public IncrementalPlacementRequestTest,
+                                           public ::testing::WithParamInterface<PlacementAmendmentMode>
+{
+};
+
+TEST_P(ConcurrentIncrementalPlacementTest, ParallelAmendments)
+{
+    const auto mode = GetParam();
+    const auto suffix = mode == PlacementAmendmentMode::Optimistic ? std::string("-occ") : std::string("-2pl");
+    setUpCluster(suffix, 2);
+    workerCatalog->addWorker(host("leaf2"), "leaf2" + suffix + ":9090", CapacityKind::Limited{0}, {host("base1")});
+    const Schema<UnqualifiedUnboundField, Ordered> schema{UnqualifiedUnboundField{Identifier::parse("id"), DataType::Type::UINT64}};
+    const auto logicalSource = sourceCatalog->addLogicalSource(Identifier::parse("stream2"), schema);
+    ASSERT_TRUE(logicalSource.has_value());
+    ASSERT_TRUE(sourceCatalog
+                    ->addPhysicalSource(
+                        *logicalSource,
+                        Identifier::parse("Generator"),
+                        host("leaf2"),
+                        {{Identifier::parse("stop_generator_when_sequence_finishes"), "ALL"},
+                         {Identifier::parse("seed"), "1"},
+                         {Identifier::parse("generator_rate_type"), "FIXED"},
+                         {Identifier::parse("generator_rate_config"), "emit_rate 2000"},
+                         {Identifier::parse("generator_schema"), fmt::format("SEQUENCE UINT64 0 {} 1", NUMBER_OF_TUPLES)}},
+                        {{Identifier::parse("type"), "CSV"}})
+                    .has_value());
+    auto secondOutput = std::filesystem::temp_directory_path() / ("isqd-" + UUIDToString(generateUUID()) + ".csv");
+    ASSERT_TRUE(sinkCatalog
+                    ->addSinkDescriptor(
+                        Identifier::parse("snk2"),
+                        schema,
+                        Identifier::parse("File"),
+                        host("cloud"),
+                        {{Identifier::parse("FILE_PATH"), secondOutput.string()}, {Identifier::parse("OUTPUT_FORMAT"), "CSV"}},
+                        {})
+                    .has_value());
+
+    const auto queryManager = createQueryManager();
+    const auto first = startQuery(*queryManager, "SELECT * FROM stream WHERE id >= 0 INTO snk");
+    const auto second = startQuery(*queryManager, "SELECT * FROM stream2 WHERE id >= 0 INTO snk2");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    IncrementalPlacementRequest request(
+        *queryManager,
+        copyPtr(workerCatalog),
+        QueryDecomposer(copyPtr(workerCatalog), copyPtr(sourceCatalog), copyPtr(sinkCatalog)),
+        defaultConfiguration<QueryOptimizerConfiguration>().network,
+        IncrementalPlacementConfiguration{
+            .enableIncrementalPlacement = true,
+            .drainTimeout = std::chrono::seconds(30),
+            .placementAmendmentMode = mode,
+            .placementAmendmentThreadCount = 2});
+    const auto result = request.execute(
+        {RemoveLinkEvent{.upstream = host("leaf"), .downstream = host("base1")},
+         AddLinkEvent{.upstream = host("leaf"), .downstream = host("base2")},
+         RemoveLinkEvent{.upstream = host("leaf2"), .downstream = host("base1")},
+         AddLinkEvent{.upstream = host("leaf2"), .downstream = host("base2")}});
+    EXPECT_EQ(result.numberOfAffectedQueries, 2U);
+    EXPECT_EQ(result.numberOfFailedAmendments, 0U);
+    /// Both selections need a slot on base2 or in the cloud; base2 has two.
+    EXPECT_LE(workerCatalog->getOccupiedSlots(host("base2")), 2U);
+
+    waitForStop(*queryManager, first);
+    waitForStop(*queryManager, second);
+    expectEveryTupleExactlyOnce();
+    std::swap(outputFile, secondOutput);
+    expectEveryTupleExactlyOnce();
+    std::swap(outputFile, secondOutput);
+    std::filesystem::remove(secondOutput);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Modes, ConcurrentIncrementalPlacementTest, ::testing::Values(PlacementAmendmentMode::Optimistic, PlacementAmendmentMode::Pessimistic));
+}
