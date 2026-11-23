@@ -352,7 +352,7 @@ struct StatementOutputAssembler<ShowQueriesStatementResult>
                 {
                     if (statusResult)
                     {
-                        const auto& [_, state, metrics] = *statusResult;
+                        const auto& [_, state, metrics, networkSinksConnected] = *statusResult;
                         output.emplace_back(
                             id,
                             queryId.getLocalQueryId(),

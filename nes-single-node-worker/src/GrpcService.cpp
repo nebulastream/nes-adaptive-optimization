@@ -21,6 +21,7 @@
 #include <utility>
 #include <Identifiers/Identifiers.hpp>
 #include <Plans/LogicalPlan.hpp>
+#include <Reconfiguration/ReconfigurationMarker.hpp>
 
 #include <Serialization/QueryPlanSerializationUtil.hpp>
 #include <cpptrace/basic.hpp>
@@ -152,6 +153,20 @@ grpc::Status GRPCServer::StopQuery(grpc::ServerContext* context, const StopQuery
         context);
 }
 
+grpc::Status GRPCServer::AddReconfigurationMarker(
+    grpc::ServerContext* context, const ReconfigurationMarkerRequest* request, ReconfigurationMarkerReply* reply)
+{
+    return tryWithDefaultHandling(
+        [&]
+        {
+            const auto queryId = QueryPlanSerializationUtil::deserializeQueryId(request->queryid());
+            const auto marker = ReconfigurationMarker::deserialize(request->marker());
+            reply->set_hasevent(getValueOrThrow(delegate.addReconfigurationMarker(queryId, marker)));
+            return grpc::Status::OK;
+        },
+        context);
+}
+
 grpc::Status GRPCServer::RequestQueryStatus(grpc::ServerContext* context, const QueryStatusRequest* request, QueryStatusReply* reply)
 {
     return tryWithDefaultHandling(
@@ -163,6 +178,7 @@ grpc::Status GRPCServer::RequestQueryStatus(grpc::ServerContext* context, const 
             {
                 const auto& [start, running, stop, error] = queryStatus->metrics;
                 reply->set_state(static_cast<::QueryState>(queryStatus->state));
+                reply->set_networksinksconnected(queryStatus->networkSinksConnected);
 
                 if (start.has_value())
                 {

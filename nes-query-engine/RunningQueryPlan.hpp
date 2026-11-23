@@ -16,10 +16,12 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 #include <Identifiers/Identifiers.hpp>
+#include <Reconfiguration/ReconfigurationMarker.hpp>
 #include <folly/Synchronized.h>
 #include <Callback.hpp>
 #include <ErrorHandling.hpp>
@@ -60,7 +62,8 @@ struct RunningQueryPlanNode
         std::unique_ptr<ExecutablePipelineStage> stage,
         std::function<void(Exception)> unregisterWithError,
         CallbackRef planRef,
-        CallbackRef setupCallback);
+        CallbackRef setupCallback,
+        std::shared_ptr<ReconfigurationState> reconfigurationState);
 
 
     ~RunningQueryPlanNode();
@@ -70,12 +73,14 @@ struct RunningQueryPlanNode
         std::vector<std::shared_ptr<RunningQueryPlanNode>> successors,
         std::unique_ptr<ExecutablePipelineStage> stage,
         std::function<void(Exception)> unregisterWithError,
-        CallbackRef planRef)
+        CallbackRef planRef,
+        std::shared_ptr<ReconfigurationState> reconfigurationState)
         : id(id)
         , successors(std::move(successors))
         , stage(std::move(stage))
         , unregisterWithError(std::move(unregisterWithError))
         , planRef(std::move(planRef))
+        , reconfigurationState(std::move(reconfigurationState))
     {
     }
 
@@ -90,6 +95,8 @@ struct RunningQueryPlanNode
 
     std::function<void(Exception)> unregisterWithError;
     CallbackRef planRef;
+    /// The reconfiguration state of the query, shared by all of its nodes.
+    std::shared_ptr<ReconfigurationState> reconfigurationState;
 };
 
 struct QueryLifetimeListener
@@ -134,6 +141,14 @@ struct RunningQueryPlan final
     /// 1. Not notify any listeners. `onDestruction` will not be called.
     /// 2. Pipelines are not terminated, just destroyed.
     static std::unique_ptr<ExecutableQueryPlan> dispose(std::unique_ptr<RunningQueryPlan> runningQueryPlan);
+
+    /// Injects a reconfiguration marker into the query (the original's NodeEngine::addReconfigureMarker) and returns the event of the
+    /// query, or nothing if the marker has no event for the query or was already recorded. A drain or update-and-drain event drains all
+    /// sources of the query: they end their stream with the marker. An update event is applied by the network sinks.
+    std::optional<ReconfigurationMetadata> injectReconfigurationMarker(const ReconfigurationMarker& marker);
+
+    /// True if every network sink of the query has an established channel to its receiver.
+    bool areNetworkSinksConnected();
 
     /// Destroying a RunningQueryPlan will:
     /// 1. Will invoke listeners!

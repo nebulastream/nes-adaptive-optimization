@@ -16,6 +16,7 @@
 #include <memory>
 #include <Identifiers/Identifiers.hpp>
 #include <Listeners/AbstractQueryStatusListener.hpp>
+#include <Reconfiguration/ReconfigurationMarker.hpp>
 #include <Runtime/BufferManager.hpp>
 #include <ExecutableQueryPlan.hpp>
 #include <QueryEngineConfiguration.hpp>
@@ -38,6 +39,12 @@ public:
         std::shared_ptr<BufferManager> bm,
         const Host& host);
     void stop(QueryId queryId);
+    /// Injects a reconfiguration marker of ISQD into a running query. Returns false if the query is not running or the marker has no new
+    /// event for it.
+    bool injectReconfigurationMarker(QueryId queryId, const ReconfigurationMarker& marker);
+    /// True if the query is running and every network sink of it has an established channel to its receiver (ISQD: until then, the
+    /// receiver may hand the channel to another sender).
+    bool areNetworkSinksConnected(QueryId queryId);
     void start(std::unique_ptr<ExecutableQueryPlan> executableQueryPlan);
     ~QueryEngine();
 

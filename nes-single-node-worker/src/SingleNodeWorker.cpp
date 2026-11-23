@@ -140,6 +140,20 @@ std::expected<void, Exception> SingleNodeWorker::stopQuery(QueryId queryId) noex
     std::unreachable();
 }
 
+std::expected<bool, Exception> SingleNodeWorker::addReconfigurationMarker(QueryId queryId, const ReconfigurationMarker& marker) noexcept
+{
+    CPPTRACE_TRY
+    {
+        PRECONDITION(queryId != INVALID_QUERY_ID, "QueryId must be not invalid!");
+        return nodeEngine->injectReconfigurationMarker(queryId, marker);
+    }
+    CPPTRACE_CATCH(...)
+    {
+        return std::unexpected{wrapExternalException()};
+    }
+    std::unreachable();
+}
+
 std::expected<LocalQueryStatusSnapshot, Exception> SingleNodeWorker::getQueryStatus(QueryId queryId) const noexcept
 {
     CPPTRACE_TRY
@@ -149,6 +163,7 @@ std::expected<LocalQueryStatusSnapshot, Exception> SingleNodeWorker::getQuerySta
         {
             return std::unexpected{QueryNotFound("{}", queryId)};
         }
+        status->networkSinksConnected = status->state == QueryStatus::Running and nodeEngine->areNetworkSinksConnected(queryId);
         return status.value();
     }
     CPPTRACE_CATCH(...)
@@ -165,7 +180,7 @@ WorkerStatus SingleNodeWorker::getWorkerStatus(std::chrono::system_clock::time_p
     WorkerStatus status;
     status.after = after;
     status.until = until;
-    for (const auto& [queryId, state, metrics] : summaries)
+    for (const auto& [queryId, state, metrics, networkSinksConnected] : summaries)
     {
         switch (state)
         {

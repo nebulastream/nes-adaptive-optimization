@@ -184,6 +184,11 @@ public:
         WorkEmitter& emitter);
     void stopQuery(QueryId queryId);
 
+    bool injectReconfigurationMarker(QueryId queryId, const ReconfigurationMarker& marker);
+
+    /// True if the query is running and every network sink of it has an established channel to its receiver.
+    bool areNetworkSinksConnected(QueryId queryId);
+
     void clear()
     {
         const std::scoped_lock lock(mutex);
@@ -209,6 +214,8 @@ struct DefaultPEC final : PipelineExecutionContext
     size_t numberOfThreads;
     WorkerThreadId threadId;
     PipelineId pipelineId;
+    /// Kept alive by the node of the pipeline, which outlives the execution context.
+    ReconfigurationState* reconfigurationState;
 
 #ifndef NO_ASSERT
     bool wasRepeated = false;
@@ -218,6 +225,7 @@ struct DefaultPEC final : PipelineExecutionContext
         size_t numberOfThreads,
         WorkerThreadId threadId,
         PipelineId pipelineId,
+        ReconfigurationState& reconfigurationState,
         std::shared_ptr<AbstractBufferProvider> bm,
         std::function<bool(const TupleBuffer& tb, ContinuationPolicy)> handler,
         std::function<void(const TupleBuffer& tb, std::chrono::milliseconds)> repeatHandler)
@@ -227,7 +235,14 @@ struct DefaultPEC final : PipelineExecutionContext
         , numberOfThreads(numberOfThreads)
         , threadId(threadId)
         , pipelineId(pipelineId)
+        , reconfigurationState(&reconfigurationState)
     {
+    }
+
+    [[nodiscard]] ReconfigurationState& getReconfigurationState() override
+    {
+        PRECONDITION(!wasRepeated, "A task should terminate after repeating");
+        return *reconfigurationState;
     }
 
     [[nodiscard]] WorkerThreadId getWorkerThreadId() const override
@@ -494,6 +509,7 @@ bool ThreadPool::WorkerThread::operator()(WorkTask& task) const
             pool.numberOfThreads(),
             WorkerThread::id,
             pipeline->id,
+            *pipeline->reconfigurationState,
             pool.bufferProvider,
             [&](const TupleBuffer& tupleBuffer, PipelineExecutionContext::ContinuationPolicy continuationPolicy)
             {
@@ -560,6 +576,7 @@ bool ThreadPool::WorkerThread::operator()(StartPipelineTask& startPipeline) cons
             pool.numberOfThreads(),
             WorkerThread::id,
             pipeline->id,
+            *pipeline->reconfigurationState,
             pool.bufferProvider,
             [](const TupleBuffer&, PipelineExecutionContext::ContinuationPolicy)
             {
@@ -639,6 +656,7 @@ bool ThreadPool::WorkerThread::operator()(StopPipelineTask& stopPipelineTask) co
         pool.numberOfThreads(),
         WorkerThread::id,
         stopPipelineTask.pipeline->id,
+        *stopPipelineTask.pipeline->reconfigurationState,
         pool.bufferProvider,
         [&](const TupleBuffer& tupleBuffer, PipelineExecutionContext::ContinuationPolicy policy)
         {
@@ -808,6 +826,18 @@ QueryEngine::QueryEngine(
 }
 
 /// NOLINTNEXTLINE Intentionally non-const
+/// NOLINTNEXTLINE Intentionally non-const
+bool QueryEngine::injectReconfigurationMarker(const QueryId queryId, const ReconfigurationMarker& marker)
+{
+    ENGINE_LOG_INFO("Injecting reconfiguration marker {} into Query {}", marker.getId(), queryId);
+    return queryCatalog->injectReconfigurationMarker(queryId, marker);
+}
+
+bool QueryEngine::areNetworkSinksConnected(const QueryId queryId)
+{
+    return queryCatalog->areNetworkSinksConnected(queryId);
+}
+
 void QueryEngine::stop(QueryId queryId)
 {
     ENGINE_LOG_INFO("Stopping Query: {}", queryId);
@@ -981,6 +1011,39 @@ void QueryCatalog::start(
             "not transition into running until the callback is dropped.");
         RunningQueryPlan::dispose(std::move(runningQueryPlan));
     }
+}
+
+bool QueryCatalog::injectReconfigurationMarker(const QueryId id, const ReconfigurationMarker& marker)
+{
+    const std::scoped_lock lock(mutex);
+    const auto it = queryStates.find(id);
+    if (it == queryStates.end())
+    {
+        ENGINE_LOG_WARNING(
+            "Attempting to inject a reconfiguration marker into query {} failed. Query was not submitted to the engine.", id);
+        return false;
+    }
+    bool hasEvent = false;
+    if (!it->second->applyIfIs<Running>([&](Running& running)
+                                        { hasEvent = running.plan->injectReconfigurationMarker(marker).has_value(); }))
+    {
+        ENGINE_LOG_WARNING("Attempting to inject a reconfiguration marker into query {} failed. Query is not running.", id);
+        return false;
+    }
+    return hasEvent;
+}
+
+bool QueryCatalog::areNetworkSinksConnected(const QueryId id)
+{
+    const std::scoped_lock lock(mutex);
+    const auto it = queryStates.find(id);
+    if (it == queryStates.end())
+    {
+        return false;
+    }
+    bool connected = false;
+    it->second->applyIfIs<Running>([&](Running& running) { connected = running.plan->areNetworkSinksConnected(); });
+    return connected;
 }
 
 void QueryCatalog::stopQuery(QueryId id)

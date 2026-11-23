@@ -53,6 +53,9 @@ struct LocalQueryStatusSnapshot
     QueryId queryId = INVALID_QUERY_ID;
     QueryStatus state = QueryStatus::Registered;
     QueryMetrics metrics{};
+    /// The query is running and every network sink of it has an established channel to its receiver. ISQD reuses the channel of a
+    /// removed chain for the new chain, so the coordinator waits for this before it reconfigures the query again.
+    bool networkSinksConnected = false;
 };
 }
 
