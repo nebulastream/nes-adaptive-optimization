@@ -12,7 +12,13 @@
     limitations under the License.
 */
 
+#include <atomic>
+#include <chrono>
+#include <optional>
+#include <thread>
 #include <variant>
+#include <vector>
+#include <PlacementAmendmentMode.hpp>
 #include <WorkerCatalog.hpp>
 #include <WorkerConfig.hpp>
 
@@ -268,6 +274,114 @@ TEST_F(WorkerCatalogTest, TopologyDiamondRemoveIntermediateNode)
     EXPECT_THAT(paths, SizeIs(1));
 }
 
+/// Links can be changed at runtime. Every change bumps the version and keeps the worker's downstream list in sync with the topology.
+TEST_F(WorkerCatalogTest, AddAndRemoveLink)
+{
+    WorkerCatalog catalog;
+    const auto cloud = Host("cloud:9090");
+    const auto base1 = Host("base1:9090");
+    const auto base2 = Host("base2:9090");
+    const auto leaf = Host("leaf:9090");
+    catalog.addWorker(cloud, "cloud:4321", CapacityKind::Unlimited{}, {});
+    catalog.addWorker(base1, "base1:4321", CapacityKind::Unlimited{}, {cloud});
+    catalog.addWorker(base2, "base2:4321", CapacityKind::Unlimited{}, {cloud});
+    catalog.addWorker(leaf, "leaf:4321", CapacityKind::Unlimited{}, {base1});
+
+    const auto versionBefore = catalog.getVersion();
+    EXPECT_TRUE(catalog.removeLink(leaf, base1));
+    EXPECT_FALSE(catalog.removeLink(leaf, base1));
+    catalog.addLink(leaf, base2);
+    EXPECT_THAT(catalog.getVersion(), Eq(versionBefore + 2));
+    EXPECT_THAT(catalog.getWorker(leaf)->downstream, ElementsAre(base2));
+    EXPECT_TRUE(catalog.getTopology().hasLink(leaf, base2));
+    EXPECT_THROW(catalog.addLink(leaf, base2), Exception);
+    EXPECT_THAT(catalog.getVersion(), Eq(versionBefore + 2));
+}
+
+/// Slots are occupied and released per worker; a limited worker rejects an occupation that exceeds its remaining capacity.
+TEST_F(WorkerCatalogTest, OccupyAndReleaseSlots)
+{
+    WorkerCatalog catalog;
+    const auto limited = Host("limited:9090");
+    const auto unlimited = Host("unlimited:9090");
+    catalog.addWorker(limited, "limited:4321", CapacityKind::Limited{3}, {});
+    catalog.addWorker(unlimited, "unlimited:4321", CapacityKind::Unlimited{}, {});
+
+    EXPECT_TRUE(catalog.tryOccupySlots(limited, 2));
+    EXPECT_FALSE(catalog.tryOccupySlots(limited, 2));
+    EXPECT_THAT(catalog.getOccupiedSlots(limited), Eq(2U));
+    EXPECT_THAT(std::get<CapacityKind::Limited>(catalog.getAvailableSlots(limited)).value, Eq(1U));
+    EXPECT_TRUE(catalog.tryOccupySlots(limited, 1));
+    EXPECT_THAT(std::get<CapacityKind::Limited>(catalog.getAvailableSlots(limited)).value, Eq(0U));
+
+    /// The initial placement may exceed the capacity, the available slots never become negative.
+    catalog.occupySlots(limited, 2);
+    EXPECT_THAT(std::get<CapacityKind::Limited>(catalog.getAvailableSlots(limited)).value, Eq(0U));
+    EXPECT_FALSE(catalog.releaseSlots(limited, 6));
+    EXPECT_TRUE(catalog.releaseSlots(limited, 5));
+    EXPECT_THAT(catalog.getOccupiedSlots(limited), Eq(0U));
+
+    EXPECT_TRUE(catalog.tryOccupySlots(unlimited, 1000));
+    EXPECT_TRUE(std::holds_alternative<CapacityKind::Unlimited>(catalog.getAvailableSlots(unlimited)));
+}
+
+/// A worker can only be locked by one amendment. LockedWorkers waits until the other amendment released its locks.
+TEST_F(WorkerCatalogTest, LockWorkersForPessimisticAmendments)
+{
+    WorkerCatalog catalog;
+    const auto a = Host("a:9090");
+    const auto b = Host("b:9090");
+    catalog.addWorker(a, "a:4321", CapacityKind::Unlimited{}, {});
+    catalog.addWorker(b, "b:4321", CapacityKind::Unlimited{}, {});
+
+    EXPECT_TRUE(catalog.tryLockWorker(a));
+    EXPECT_FALSE(catalog.tryLockWorker(a));
+    catalog.unlockWorker(a);
+
+    std::atomic_bool secondLocked = false;
+    std::optional<LockedWorkers> first = LockedWorkers::lock(catalog, {a, b});
+    std::jthread second(
+        [&]
+        {
+            const auto locked = LockedWorkers::lock(catalog, {b});
+            secondLocked = true;
+        });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(secondLocked);
+    first.reset();
+    second.join();
+    EXPECT_TRUE(secondLocked);
+    EXPECT_TRUE(catalog.tryLockWorker(a));
+    EXPECT_TRUE(catalog.tryLockWorker(b));
+}
+
+/// Concurrent amendments occupy the slots of a worker atomically: no more slots than available are handed out.
+TEST_F(WorkerCatalogTest, ConcurrentSlotOccupation)
+{
+    WorkerCatalog catalog;
+    const auto worker = Host("w:9090");
+    catalog.addWorker(worker, "w:4321", CapacityKind::Limited{100}, {});
+    std::atomic<size_t> occupied = 0;
+    {
+        std::vector<std::jthread> threads;
+        for (size_t thread = 0; thread < 8; ++thread)
+        {
+            threads.emplace_back(
+                [&]
+                {
+                    for (size_t attempt = 0; attempt < 50; ++attempt)
+                    {
+                        if (catalog.tryOccupySlots(worker, 1))
+                        {
+                            ++occupied;
+                        }
+                    }
+                });
+        }
+    }
+    EXPECT_THAT(occupied.load(), Eq(100U));
+    EXPECT_THAT(catalog.getOccupiedSlots(worker), Eq(100U));
+}
 }
 
 /// NOLINTEND(google-build-using-namespace, readability-identifier-length, bugprone-unchecked-optional-access, readability-magic-numbers)
