@@ -73,3 +73,28 @@ add_e2e_test(
     BATS_FILE repl/tests/isqd.bats
     DOCKER_COMPOSE
 )
+
+add_executable(isqp-scaling-benchmark isqp-benchmark/IsqpScalingBenchmark.cpp)
+target_link_libraries(isqp-scaling-benchmark PRIVATE nes-frontend-embedded-lib argparse::argparse)
+
+if (NES_ENABLES_TESTS)
+    # Keeps the benchmark working: a tiny run in both modes.
+    add_test(NAME isqp-scaling-benchmark-plan
+            COMMAND isqp-scaling-benchmark --mode plan --fog 3 --leaves 6 --queries 6 --batch-moves 1,4 --sequence-requests 5
+                    --threads 1,2 --runs 1 --strict -o ${CMAKE_CURRENT_BINARY_DIR}/isqp-scaling-plan.csv
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    add_test(NAME isqp-scaling-benchmark-plan-join
+            COMMAND isqp-scaling-benchmark --mode plan --query join --fog 3 --leaves 6 --queries 6 --batch-moves 1,4
+                    --sequence-requests 5 --threads 1,2 --runs 1 --strict -o ${CMAKE_CURRENT_BINARY_DIR}/isqp-scaling-plan-join.csv
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    add_test(NAME isqp-scaling-benchmark-deploy
+            COMMAND isqp-scaling-benchmark --mode deploy --fog 2 --leaves 2 --queries 2 --batch-moves 1 --sequence-requests 2
+                    --placement incremental --amendment-modes Optimistic --threads 2 --runs 1 --warmup-ms 300 --strict
+                    -o ${CMAKE_CURRENT_BINARY_DIR}/isqp-scaling-deploy.csv
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    add_test(NAME isqp-scaling-benchmark-deploy-join
+            COMMAND isqp-scaling-benchmark --mode deploy --query join --fog 3 --leaves 3 --queries 3 --batch-moves 1,2
+                    --sequence-requests 3 --placement incremental --amendment-modes Optimistic --threads 2 --runs 1 --warmup-ms 300
+                    --drain-timeout-ms 10000 --strict -o ${CMAKE_CURRENT_BINARY_DIR}/isqp-scaling-deploy-join.csv
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endif ()
